@@ -460,6 +460,85 @@ impl Filterbank {
         self.data.shape()[1]
     }
 
+    /// Corner frequencies of every band, `(num_bands, 2)`.
+    ///
+    /// The lowest and highest non-zero bin of each band, mapped to their frequencies.
+    pub fn corner_frequencies(&self) -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((self.num_bands(), 2));
+        for band in 0..self.num_bands() {
+            let (min_bin, max_bin) = self.band_extent(band);
+            out[[band, 0]] = self.bin_frequencies[min_bin];
+            out[[band, 1]] = self.bin_frequencies[max_bin];
+        }
+        out
+    }
+
+    /// Center frequencies of every band.
+    ///
+    /// For a band with a flat top (a rectangular filter) the middle bin is used, for a
+    /// band with a peak the peak bin is — the slice excluding the last bin, exactly as
+    /// the reference indexes it.
+    pub fn center_frequencies(&self) -> Array1<f64> {
+        let mut out = Array1::<f64>::zeros(self.num_bands());
+        for band in 0..self.num_bands() {
+            let (min_bin, max_bin) = self.band_extent(band);
+            let column = self.data.column(band);
+            let center = if column[min_bin] == column[max_bin] {
+                min_bin + (max_bin - min_bin) / 2
+            } else {
+                let slice = column.slice(ndarray::s![min_bin..max_bin]);
+                let peak = slice
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |acc, (index, value)| {
+                        if *value > acc.1 {
+                            (index, *value)
+                        } else {
+                            acc
+                        }
+                    })
+                    .0;
+                min_bin + peak
+            };
+            out[band] = self.bin_frequencies[center];
+        }
+        out
+    }
+
+    /// Lowest and highest non-zero bin of one band.
+    fn band_extent(&self, band: usize) -> (usize, usize) {
+        let column = self.data.column(band);
+        let first = column
+            .iter()
+            .position(|value| *value != 0.0)
+            .unwrap_or_else(|| panic!("band {band} has no non-zero bin"));
+        let last = column
+            .iter()
+            .rposition(|value| *value != 0.0)
+            .unwrap_or(first);
+        (first, last)
+    }
+
+    /// Lowest frequency covered by the filterbank.
+    pub fn fmin(&self) -> f64 {
+        self.bin_frequencies[self
+            .data
+            .iter()
+            .position(|value| *value != 0.0)
+            .expect("empty filterbank")]
+    }
+
+    /// Highest frequency covered by the filterbank.
+    pub fn fmax(&self) -> f64 {
+        let index = self
+            .data
+            .rows()
+            .into_iter()
+            .rposition(|row| row.iter().any(|value| *value != 0.0))
+            .expect("empty filterbank");
+        self.bin_frequencies[index]
+    }
+
     /// Apply the filterbank to a spectrogram slice: `spectrum · filterbank`.
     pub fn apply(&self, spectrum: ArrayView1<'_, f32>) -> Array1<f32> {
         assert_eq!(

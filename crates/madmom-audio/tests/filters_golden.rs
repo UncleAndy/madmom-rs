@@ -173,6 +173,21 @@ fn filterbanks_and_frequency_tables_match_the_reference() {
                 &shape,
                 tag,
             ),
+            // center frequencies of the bands (they become bin frequencies downstream)
+            "filterbank_log12_centers" => close_array1(
+                &logarithmic_filterbank(bins_view, 12, 30.0, 17000.0, A4, true, true)
+                    .unwrap()
+                    .center_frequencies(),
+                &expected,
+                tag,
+            ),
+            "filterbank_log6_centers" => close_array1(
+                &logarithmic_filterbank(bins_view, 6, 30.0, 17000.0, A4, true, true)
+                    .unwrap()
+                    .center_frequencies(),
+                &expected,
+                tag,
+            ),
             "conversions_mel_frequencies_3" => {
                 close_array1(&mel_frequencies(3, 20.0, 17000.0), &expected, tag)
             }
@@ -249,7 +264,7 @@ fn filterbanks_and_frequency_tables_match_the_reference() {
         checked += 1;
     }
 
-    assert_eq!(checked, 20, "expected the twenty dumped cases");
+    assert_eq!(checked, 22, "expected the twenty-two dumped cases");
     eprintln!("largest |filterbank - reference| = {worst:.3e} (bound {FILTER_ATOL:.0e})");
 }
 

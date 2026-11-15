@@ -40,6 +40,8 @@ def main(argv):
         "filterbank_mel40_all": lambda: MelFilterbank(bin_frequencies, 40, 20., 17000., True, False),
         "filterbank_bark_normal": lambda: BarkFilterbank(bin_frequencies, num_bands='normal', fmin=20., fmax=15500., norm_filters=True, unique_filters=True),
         "filterbank_bark_double": lambda: BarkFilterbank(bin_frequencies, num_bands='double', fmin=20., fmax=15500., norm_filters=True, unique_filters=True),
+        "filterbank_log12_centers": lambda: LogarithmicFilterbank(bin_frequencies, 12, 30., 17000., 440., True, True).center_frequencies,
+        "filterbank_log6_centers": lambda: LogarithmicFilterbank(bin_frequencies, 6, 30., 17000., 440., True, True).center_frequencies,
         "conversions_mel_frequencies_3": lambda: mel_frequencies(3, 20., 17000.),
         "conversions_mel_frequencies_40": lambda: mel_frequencies(40, 20., 17000.),
         "conversions_log_frequencies_12": lambda: log_frequencies(12, 30., 17000., 440.),

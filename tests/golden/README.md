@@ -85,6 +85,25 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
 and requires the format, shape, rate and **all samples** to be identical (verified:
 bit-exact on all nine cases).
 
+## Spectrogram chain (`sample.*.npy`)
+
+`crates/madmom-audio/tests/spectrogram_golden.rs` replays the dumped chain stage by
+stage (magnitudes → logarithmic filterbank, 6 bands per octave → `log10(1 + x)` →
+positive differences, ratio 0.5, stacked horizontally) and compares every stage against
+its own dump. Observed differences with a 1e-5 bound:
+
+| stage | max abs diff |
+| --- | --- |
+| `spec` (`\|STFT\|`) | 7.629e-06 |
+| `filt` (filterbank) | 7.629e-06 |
+| `logspec` (`log10(1+x)`) | 1.192e-07 |
+| `diff` (positive, hstacked) | 2.384e-07 |
+
+The 7.6e-06 is exactly **one float32 ulp** at the magnitudes involved (64–128): the two
+FFT implementations agree in float64, and casting their results into `complex64` flips
+the last bit for a small fraction of the values. That is why the plan's tolerance for
+spectrograms is 1e-5 and not 1e-9.
+
 ## Filterbanks and frequency tables (`filters/`)
 
 Produced by `tools/dump_filters.py` from madmom's own filterbanks, with the bin

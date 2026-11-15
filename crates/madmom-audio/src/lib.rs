@@ -9,6 +9,8 @@
 //! - [`stft`] — `madmom/audio/stft.py`: the short-time Fourier transform, its windows
 //!   and the bin frequencies.
 //! - [`filters`] — `madmom/audio/filters.py`: frequency scales, filters and filterbanks.
+//! - [`spectrogram`] — `madmom/audio/spectrogram.py`: magnitudes, filtering, logarithmic
+//!   scaling and temporal differences.
 //!
 //! Numeric fidelity: samples are held as `f32` together with the [`signal::DType`]
 //! they were loaded as, because madmom's DSP decisions (window scaling by
@@ -19,4 +21,5 @@
 
 pub mod filters;
 pub mod signal;
+pub mod spectrogram;
 pub mod stft;
