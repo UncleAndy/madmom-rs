@@ -5,3 +5,5 @@
 #![deny(missing_docs)]
 
 pub mod inference;
+
+pub mod hmm;

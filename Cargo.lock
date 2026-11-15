@@ -55,7 +55,10 @@ version = "0.1.0"
 dependencies = [
  "madmom-audio",
  "madmom-core",
+ "madmom-io",
  "madmom-ml",
+ "ndarray",
+ "thiserror",
 ]
 
 [[package]]
