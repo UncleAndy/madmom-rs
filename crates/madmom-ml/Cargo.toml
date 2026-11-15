@@ -1,0 +1,22 @@
+# Generated scaffold; dependency set is finalised per phase.
+[package]
+name = "madmom-ml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+madmom-core = { path = "../madmom-core" }
+madmom-io = { path = "../madmom-io" }
+ndarray.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# triton-live pulls the in-process Triton bindings. Requires
+# libtritonserver.so and backends built by tools/build_triton_core.sh
+# and tools/build_onnx_backend.sh; keep it off for golden-mode work.
+triton-live = ["dep:tritonserver-rs"]

@@ -1,0 +1,15 @@
+# Generated scaffold; dependency set is finalised per phase.
+[package]
+name = "madmom"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+madmom-core = { path = "../madmom-core" }
+madmom-audio = { path = "../madmom-audio" }
+madmom-ml = { path = "../madmom-ml" }
+madmom-features = { path = "../madmom-features" }
+madmom-io = { path = "../madmom-io" }

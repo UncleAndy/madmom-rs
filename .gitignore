@@ -22,3 +22,17 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Triton runtime built from source (tools/build_triton_core.sh); not tracked.
+/third_party/triton-runtime/
+/build/
+
+# Model repository: converted ONNX models and their sources are large artifacts
+# and are licensed separately (CC BY-NC-SA). Provide via MADMOM_MODEL_REPO.
+/models/
+/third_party/madmom-models-onnx/
+
+# Python bytecode from the tools/ scripts
+__pycache__/
+*.pyc
+.pytest_cache/

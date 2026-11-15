@@ -1,0 +1,42 @@
+# madmom-rs workspace
+#
+# External dependency versions are major-only on purpose: they are resolved and
+# locked on the first `cargo build` on a machine with network access. Do not bump
+# them by hand without re-running the parity tests.
+[workspace]
+resolver = "2"
+members = [
+    "crates/madmom-core",
+    "crates/madmom-audio",
+    "crates/madmom-ml",
+    "crates/madmom-features",
+    "crates/madmom-io",
+    "crates/madmom",
+    "crates/madmom-testkit",
+    "crates/madmom-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "BSD-3-Clause"
+repository = "https://github.com/UncleAndy/madmom-rs"
+authors = ["Andrey Velikoredchanin <andy@andyhost.world>"]
+
+[workspace.dependencies]
+ndarray = "0.16"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+hound = "3"
+rustfft = "6"
+# Inference: Triton Inference Server bindings, built from the submodule in
+# third_party/tritonserver-rs. Kept optional so that models-free work
+# (DSP, HMM, CLI) builds and tests without libtritonserver.so.
+tritonserver-rs = { path = "third_party/tritonserver-rs", default-features = false, optional = true }
+
+[profile.release]
+lto = "thin"
