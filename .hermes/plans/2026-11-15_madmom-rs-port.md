@@ -581,13 +581,28 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
 сборка эталона madmom и baseline, смоук-инференс, ONNX-графы (`onnx.checker`
 не на чем запустить), числовые проверки графов против эталонных активаций.
 
-**Заблокировано:** часть `git add`/`git commit` падает с
-`insufficient permission ... .git/objects`: 8 подкаталогов `.git/objects/{17,23,46,89,99,bf,d1,db}`
-принадлежат `nobody:nogroup` и запись в них для пользователя `hermes` запрещена
-(`touch` там же не проходит), хотя `.git/objects` доступен. Коммиты 0.1 (каркас),
-0.2 (flake+скрипты), 0.4 (testkit) и 0.8 (конвертер) прошли; каркас, `flake.nix`,
-`madmom.toml`, скрипты и `inference.rs` лежат в индексе/рабочем дереве без коммита.
-Правку прав собственности делаю только по явной просьбе.
+**Гейты, прогнанные после исправления прав (cargo 1.97.0, офлайн из кэша реестра):**
+
+```
+cargo build --offline --workspace          # OK
+MADMOM_FIXTURES=$PWD/third_party/madmom/tests/data cargo test --offline --workspace   # 6 passed
+cargo clippy --offline --workspace --all-targets -- -D warnings   # чисто
+cargo fmt --all --check                    # чисто
+```
+
+Найденное и исправленное на этом гейте (коммиты `f4ea8f0`, `b108d38`, `11bf680`):
+
+- `optional = true` недопустим в `[workspace.dependencies]` — признак принадлежит
+  крейту-члену (`madmom-ml`), а не workspace;
+- `ndarray = "0.16"` неразрешим (в кэше/релизах — `0.15.6`/`0.17.2`), зафиксировано `0.17`;
+- **зависимость `tritonserver-rs` отложена до Task 2.3**: cargo разрешает
+  зависимости path-крейта даже когда он объявлен `optional` и не используется, а
+  `cuda-driver-sys` из его набора отсутствует в кэше → любой офлайн-билд workspace
+  падал. Фича `triton-live` осталась (без `dep:`), маппинг возвращается в Task 2.3.
+  В `Cargo.toml` оставлен комментарий с точной инструкцией, чтобы это не потерялось;
+- `Cargo.lock` закоммичен (сборка с бинарями — лок должен быть в репозитории).
+
+Появившийся `flake.lock` означает, что `nix develop` на хосте вычисляется успешно.
 
 
 #### Task 0.0: Сабмодули (иначе нечего собирать)
