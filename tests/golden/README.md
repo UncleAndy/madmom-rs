@@ -85,6 +85,28 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
 and requires the format, shape, rate and **all samples** to be identical (verified:
 bit-exact on all nine cases).
 
+## Filterbanks and frequency tables (`filters/`)
+
+Produced by `tools/dump_filters.py` from madmom's own filterbanks, with the bin
+frequencies of the flagship chains (2048-point FFT at 44.1 kHz, 1024 bins):
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_filters.py third_party/madmom"
+```
+
+Twenty cases: `LogarithmicFilterbank` (12/6/3 bands per octave, with and without bin
+deduplication), `MelFilterbank` (40 bands, both settings), `BarkFilterbank` (normal and
+double spacing), plus the frequency tables and scalings (`mel_frequencies`,
+`log_frequencies`, `semitone_frequencies`, `bark_frequencies`,
+`bark_double_frequencies`, `hz2mel`, `hz2erb`, `hz2midi`, `midi2hz`, `erb2hz`).
+
+`crates/madmom-audio/tests/filters_golden.rs` builds every case from the tag names and
+requires agreement; the largest difference observed is **1.490e-08** (bound 1e-6), which
+is the float32 normalization sum being added up in a different order than NumPy's
+pairwise sum. The dumps already caught one transcription error in this port (the double
+Bark table had 60 Hz where madmom has 50 Hz).
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):
