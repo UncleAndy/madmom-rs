@@ -683,14 +683,15 @@ pub fn assert_array_close(a: &ArrayD<f32>, b: &ArrayD<f32>, atol: f32, rtol: f32
       через FetchContent/ExternalProject → нужна сеть при конфигурации и ~гигабайты
       сборки. Герметичная nix-деривация для этого — отдельная задача (см. §9, вопрос 2).
 - [ ] Шаг 3: **ONNX Runtime backend** (без него сервер не загрузит ONNX-модели):
-      ```bash
-      cmake -S <onnxruntime_backend r24.08> -B build/ort-backend -DCMAKE_BUILD_TYPE=Release \
-        -DTRITON_ENABLE_GPU=OFF \
-        -DTRITON_ONNXRUNTIME_INCLUDE_PATHS=$(nix eval --raw nixpkgs#onnxruntime)/include \
-        -DTRITON_ONNXRUNTIME_LIB_PATHS=$(nix eval --raw nixpkgs#onnxruntime)/lib
-      ```
-      (альтернатива — дать backend'у собрать ONNX Runtime самому: дольше и по умолчанию
-      с CUDA). Результат — `libtriton_onnxruntime.so` в `third_party/triton-runtime/backends/`.
+      `onnxruntime_backend` ветки r24.08 клонируется в `third_party/` (или добавляется
+      сабмодулем — решает владелец). **ONNX Runtime вендорим, системный не используем**
+      (решение владельца): либо backend собирает ORT сам (тогда `.so` самодостаточен),
+      либо мы пре-выбираем официальный ORT-тарболл (`onnxruntime-linux-x64-<ver>.tgz`
+      с фиксированным хешем) и указываем backend'у путь к нему. Имена CMake-переменных
+      backend'а (`TRITON_ONNXRUNTIME_*` и т.п.) взять из его `cmake/` после клонирования —
+      здесь они не выдуманы (сети для сверки у меня нет). Цена: сборка ORT из исходников —
+      десятки минут и гигабайты; пре-выбранный тарболл — минуты. Результат —
+      `libtriton_onnxruntime.so` (+ вендоренные ORT-либы) в `third_party/triton-runtime/backends/`.
 - [ ] Шаг 4: `tools/triton_env.sh` — экспорт `MADMOM_MODEL_REPO`,
       `MADMOM_TRITON_BACKENDS=$PWD/third_party/triton-runtime/backends`,
       `LD_LIBRARY_PATH=$PWD/third_party/triton-runtime/lib` (нужен и для линковки
@@ -1268,7 +1269,9 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
    `instance_group KIND_CPU`; GPU — отдельной фичей позже.
 7. **`libtritonserver.so` и ONNX Runtime backend — собираем из исходников**
    (`core` = сабмодуль, Task 0.7), не контейнер. Метрики/статистика/трассировка
-   выключены, теги репозиториев r24.08.
+   выключены, теги репозиториев r24.08. **ONNX Runtime — вендоренный**, системный
+   (nixpkgs) не используется: либо backend собирает ORT сам, либо пре-выборка
+   официального ORT-тарболла с фиксированным хешем.
 8. **Конвертер ONNX** (`tools/convert_to_onnx.py`) пишем и доводим до зелёных тестов
    **до Фазы 2** (Task 0.8) — иначе Task 2.4 нечего принимать.
 9. **ONNX-репозиторий** — `third_party/madmom-models-onnx/models` (§2.1).
@@ -1281,9 +1284,25 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
 1. **ONNX Runtime для backend'а:** системный из nixpkgs (`nixpkgs#onnxruntime`) или
    пусть backend собирает ORT сам (дольше, по умолчанию с CUDA). Я заложил системный;
    подтвердить версию ORT, совместимую с backend'ом r24.08.
-2. **Герметичная nix-деривация Triton** (R16a): нужна ли в v1 (для CI на чистой машине),
-   или v1 живёт на разовой сборке с сетью + gitignored `third_party/triton-runtime`
-   (рекомендую второе, derivation — отдельной задачей).
+2. **Герметичность сборки Triton** (R16a). Варианты (нужен выбор владельца):
+
+   - **A. Разовая сборка в devShell** (что уже в Task 0.7): сеть разрешена, артефакт в
+     gitignored `third_party/triton-runtime`. Дёшево и быстро, но не воспроизводимо:
+     CI на чистой машине не соберёт без сети и десятков минут.
+   - **B. Nix-деривация с предвыборкой всех входов**: `core`+`common`+`third_party`
+     (`fetchSubmodules`) и ORT-тарболл как fixed-output в store, а сетевые `git clone`
+     внутри ExternalProject подавляются (`git config url.<store>.insteadOf`, пре-заполнение
+     `TRITON_THIRD_PARTY_INSTALL_PREFIX`). Воспроизводимо, но это написание деривации
+     с нуля (дни) и хрупко на каждом бампе версии Triton.
+   - **C. Вендоренный бинарный артефакт из NGC-образа** `nvcr.io/nvidia/tritonserver:24.08-py3`:
+     один раз (там, где есть docker) вынуть `libtritonserver.so`, `libtriton_onnxruntime.so`,
+     ORT-либы и `backends/`, положить в отдельный артефакт/релиз с хешами. Ноль сборки
+     в CI, ровно те бинари, что у эталонного сервера; минусы — размер (сотни МБ) и условия
+     распространения бинарников NVIDIA (юридический вопрос, надо проверять).
+   - **D. Гибрид (рекомендую): A сейчас + C или B позже.** Основной путь — сборка из
+     исходников (как решено), а воспроизводимость для CI добавляется отдельной задачей,
+     когда/если CI понадобится. Критерий выбора между C и B: допустимо ли тащить
+     бинарники NVIDIA (C) и готов ли ты вложить дни в деривацию (B).
 3. **Размер/время сборки:** `core` с третьими сторонами (gRPC, protobuf, prometheus)
    — это десятки минут и гигабайты. Если хочется радикально меньше — можно отдельной
    задачей поднять конфигурацию без gRPC/HTTP-эндпоинтов (in-process они не нужны),
