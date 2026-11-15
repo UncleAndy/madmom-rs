@@ -50,6 +50,26 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def shape_error(model) -> str | None:
+    """First shape-inference failure of `model`, or None if it type-checks.
+
+    Failures inside `Scan` are ignored: the recurrent graphs have a dynamic frame axis and
+    onnxruntime infers a different shape than declared, while the graph itself runs.
+    """
+    try:
+        onnx_module = __import__("onnx")
+    except ImportError:
+        return None
+    try:
+        onnx_module.shape_inference.infer_shapes(model, strict_mode=True)
+    except Exception as exc:  # noqa: BLE001 - the message is what gets reported
+        message = str(exc)
+        if "op_type:Scan" in message:
+            return None
+        return message.splitlines()[0][:200]
+    return None
+
+
 def convert_one(pickle_path: Path, dst: Path, *, validate: bool, dry_run: bool) -> dict:
     """Convert a single pickle, returning a report row."""
     row: dict = {"pickle": str(pickle_path), "name": pickle_path.stem}
@@ -72,6 +92,13 @@ def convert_one(pickle_path: Path, dst: Path, *, validate: bool, dry_run: bool) 
         return row
     except SystemExit as exc:
         row.update(status="no-onnx-package", error=str(exc))
+        return row
+    broken = shape_error(onnx_model)
+    if broken is not None:
+        # A graph that does not even type-check cannot be trusted: without this gate the
+        # builder reported models as converted while their shapes were inconsistent
+        # (key_cnn_1..4 fail on ReduceMean, onsets_cnn on Transpose).
+        row.update(status="unsupported", error="graph does not type-check: " + broken)
         return row
     if validate:
         onnx, _, _ = onnx_spec._require_onnx()
