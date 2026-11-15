@@ -160,6 +160,13 @@ impl TransitionModel {
         &self.states[start..end]
     }
 
+    /// Transition probabilities of `state` (the forward algorithm reads these).
+    pub fn probabilities_of(&self, state: usize) -> &[f64] {
+        let start = self.pointers[state] as usize;
+        let end = self.pointers[state + 1] as usize;
+        &self.probabilities[start..end]
+    }
+
     /// Transition log probabilities of `state`.
     pub fn log_probabilities_of(&self, state: usize) -> &[f64] {
         let start = self.pointers[state] as usize;
@@ -178,6 +185,16 @@ pub trait ObservationModel {
     /// Observations are 2-D: the beat models use a single column, the downbeat models
     /// two (beat and downbeat activations), exactly as the reference passes them.
     fn log_densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64>;
+
+    /// The same densities in the linear domain.
+    ///
+    /// The forward algorithm normalises frame by frame in the linear domain (the
+    /// reference's `forward` says so explicitly: it is faster than staying in logs), while
+    /// Viterbi works in logs. `exp(log(p))` is exact enough here — the two agree wherever
+    /// the density is not zero, and where it is zero both give zero.
+    fn densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64> {
+        self.log_densities(observations).mapv(|value| value.exp())
+    }
 }
 
 /// A discrete observation model: a `(num_states, num_observations)` probability table.
@@ -247,6 +264,8 @@ pub struct HiddenMarkovModel<O: ObservationModel> {
     transition_model: TransitionModel,
     observation_model: O,
     initial_distribution: Array1<f64>,
+    /// Forward variables of the previous frame, carried between calls in online mode.
+    prev: Vec<f64>,
 }
 
 impl<O: ObservationModel> HiddenMarkovModel<O> {
@@ -272,6 +291,7 @@ impl<O: ObservationModel> HiddenMarkovModel<O> {
         Ok(Self {
             transition_model,
             observation_model,
+            prev: initial_distribution.to_vec(),
             initial_distribution,
         })
     }
@@ -289,6 +309,51 @@ impl<O: ObservationModel> HiddenMarkovModel<O> {
     /// The initial distribution.
     pub fn initial_distribution(&self) -> &Array1<f64> {
         &self.initial_distribution
+    }
+
+    /// Reset the forward variables to the initial distribution.
+    pub fn reset(&mut self) {
+        self.prev = self.initial_distribution.to_vec();
+    }
+
+    /// The forward variables, `(num_observations, num_states)`.
+    ///
+    /// Port of `HiddenMarkovModel.forward`: the recursion runs in the **linear** domain and
+    /// every frame is normalised by the sum over the states, so the values stay in `0..1`
+    /// and no logarithms are needed. With `reset = false` the recursion continues from the
+    /// previous call, which is what the online beat tracker uses.
+    ///
+    /// The division is unguarded, like the reference's (`@cython.cdivision(True)`): a frame
+    /// whose forward sum is zero produces infinities rather than an error.
+    pub fn forward(&mut self, observations: ArrayView2<'_, f64>, reset: bool) -> Array2<f64> {
+        let num_frames = observations.shape()[0];
+        let num_states = self.transition_model.num_states();
+        let densities = self.observation_model.densities(observations);
+        if reset {
+            self.reset();
+        }
+        let pointers = self.observation_model.pointers();
+        let mut out = Array2::<f64>::zeros((num_frames, num_states));
+        for frame in 0..num_frames {
+            let mut sum = 0.0;
+            for state in 0..num_states {
+                let previous_states = self.transition_model.previous_states(state);
+                let probabilities = self.transition_model.probabilities_of(state);
+                let mut value = 0.0;
+                for (previous, probability) in previous_states.iter().zip(probabilities.iter()) {
+                    value += self.prev[*previous as usize] * *probability;
+                }
+                value *= densities[[frame, pointers[state] as usize]];
+                out[[frame, state]] = value;
+                sum += value;
+            }
+            let norm = 1.0 / sum;
+            for state in 0..num_states {
+                out[[frame, state]] *= norm;
+                self.prev[state] = out[[frame, state]];
+            }
+        }
+        out
     }
 
     /// Decode the best state path with the Viterbi algorithm.

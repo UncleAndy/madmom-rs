@@ -221,6 +221,35 @@ the unfiltered transform), while the phase-weighted ODFs must. They also pinned 
 `_complex_domain`: the first frame's target is the bare magnitude, not the magnitude with
 its own phase.
 
+## Beat trackers (`beats/`)
+
+Produced by `tools/dump_beats.py`, running madmom's own trackers on its own activation
+fixtures (`sample.beats_blstm.npz` offline, `sample.beats_lstm.npz` for the forward mode):
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_beats.py third_party/madmom"
+```
+
+Cases: the DBN's default path, `correct=False`, the thresholds 0.25 and 1, the synthetic
+activation with beats on the first and last frame, the empty path; the forward (online) mode
+all-at-once and frame by frame, with and without a reset; `BeatTrackingProcessor` (local
+tempo) and `BeatDetectionProcessor` (global tempo); `CRFBeatDetectionProcessor` with the
+candidate intervals it tries; and the four `detections/*.txt` files of the command line
+programs.
+
+`crates/madmom-features/tests/beats_trackers_golden.rs` requires every beat list to match
+within 1e-6 — and additionally that the DBN's output equals
+`detections/sample.dbn_beat_tracker.txt`, which is what makes those fixture activations the
+ones the reference program's file came from. (The 2013 `BeatTracker` and the `CRFBeatDetector`
+files come from *different* activations — the online LSTM ones — so they are dumped but not
+used as a target.)
+
+The dumps caught one reader bug: a tracker that finds nothing writes a `(0,)` array, and the
+`.npy` reader's element count used `.max(1)`, which turned the empty array into a one-element
+read (`BufferTooShort { need: 136, have: 128 }`). A 0-d scalar still holds one element; an
+array with a zero dimension holds none.
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):

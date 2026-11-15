@@ -388,6 +388,41 @@ pub fn smooth_f64(signal: ArrayView1<'_, f64>, size: usize) -> Result<Array1<f64
     }
 }
 
+/// [`signal_frame`] for a float64 signal, with the same centring and padding.
+///
+/// The beat trackers work on float64 activations (madmom casts them with `astype(float)`),
+/// so a frame cut in float32 would quantise the values the tracker compares.
+pub fn signal_frame_f64(
+    signal: ArrayView1<'_, f64>,
+    index: i64,
+    frame_size: usize,
+    hop_size: f64,
+    origin: i64,
+    pad: f64,
+) -> Array1<f64> {
+    let num_samples = signal.len() as i64;
+    let reference = (index as f64 * hop_size) as i64;
+    let start = reference - frame_size as i64 / 2 - origin;
+    let stop = start + frame_size as i64;
+    if start >= 0 && stop <= num_samples {
+        return signal
+            .slice(ndarray::s![start as usize..stop as usize])
+            .to_owned();
+    }
+    let mut frame = Array1::from_elem(frame_size, pad);
+    let copy_start = start.max(0);
+    let copy_stop = stop.min(num_samples);
+    if copy_stop > copy_start {
+        let destination_start = (copy_start - start) as usize;
+        let destination_end = destination_start + (copy_stop - copy_start) as usize;
+        let source = signal.slice(ndarray::s![copy_start as usize..copy_stop as usize]);
+        frame
+            .slice_mut(ndarray::s![destination_start..destination_end])
+            .assign(&source);
+    }
+    frame
+}
+
 /// Convert a gain in dB into a linear factor (`np.power(sqrt(10), 0.1 * gain)`).
 fn gain_factor(gain_db: f64) -> f64 {
     10f64.powf(gain_db / 20.0)

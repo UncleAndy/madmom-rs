@@ -234,6 +234,33 @@ pub fn uniform_filter_2d(
     out
 }
 
+/// `scipy.ndimage.correlate1d` with `origin = -len(weights) / 2`, in `f32`.
+///
+/// scipy correlates with the window at `input[i + j - origin - len(weights) / 2]`, so with
+/// that origin the window reaches **forward** from frame `i` — measured against scipy for
+/// several origins (`correlate1d(np.arange(1, 8), [1, 10, 100], origin=-1)` starts `321`,
+/// i.e. the window is `input[0..3]`). Out-of-range samples are `cval` (zero here), and the
+/// accumulation is `f64` before the cast, like scipy's.
+pub fn correlate1d_f32(input: &[f32], weights: &[f32], cval: f32) -> Array1<f32> {
+    let mut out = Array1::<f32>::zeros(input.len());
+    let half = (weights.len() / 2) as i64;
+    for index in 0..input.len() {
+        let mut sum = 0.0f64;
+        for (offset, weight) in weights.iter().enumerate() {
+            // origin = -half  =>  the window starts at the frame itself
+            let position = index as i64 + offset as i64 + half - half;
+            let value = if position < 0 || position as usize >= input.len() {
+                cval
+            } else {
+                input[position as usize]
+            };
+            sum += value as f64 * *weight as f64;
+        }
+        out[index] = sum as f32;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

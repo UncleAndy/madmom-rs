@@ -1402,16 +1402,39 @@ Test `…/tests/beats.rs` (порт `tests/test_features_beats.py`, 11 тест�
 `CRFBeatDetectionProcessor`: `INTERVAL_SIGMA=0.18`, `FACTORS=[0.5,0.67,1.0,1.5,2.0]`,
 `NUM_INTERVALS=5`, `MIN_BPM=20`, `MAX_BPM=240`, `ACT_SMOOTH=0.09`, `HIST_SMOOTH=7`.
 
+**Статус (2026-11-15): сделано полностью и сверено.** Файлы:
+`crates/madmom-features/src/beats.rs` (`detect_beats`, `BeatTrackingProcessor`,
+`BeatDetectionProcessor`, `correct=false`, онлайн-режим), `…/beats_crf.rs` (CRF целиком),
+`crates/madmom-ml/src/hmm.rs` (`forward`/`reset`/линейные `densities`),
+`crates/madmom-core/src/ndimage.rs` (`correlate1d`), `crates/madmom-audio/src/signal.rs`
+(`signal_frame_f64`).
+
 - [x] Шаг 1 (тест): `threshold_activations` (первый/последний кадр ≥ threshold).
-- [ ] Шаг 2 (тест): `DBNBeatTrackingProcessor` offline (offline-часть сделана): `viterbi` → `correct=True`
-      (пик активаций внутри beat-range через `np.diff(pointers[path])`) и
-      `correct=False` (`argrelmin(state_positions[path], mode='wrap')`);
-      online: `forward` + `argmax` + правило `next_beat = last + 60/max_bpm`.
-- [ ] Шаг 3 (тест): сверка с `sample.dbn_beat_tracker.txt` (точные индексы кадров).
-- [ ] Шаг 4 (тест): `BeatTrackingProcessor` (`detect_beats` c `hamming`-окном и
-      рекурсией) = `sample.beat_tracker.txt`; `BeatDetectionProcessor` =
-      `sample.beat_detector.txt`; `CRFBeatDetectionProcessor` = `sample.crf_beat_detector.txt`.
-- [ ] Шаг 5: коммит `feat(features): beat trackers (DBN, tracking, CRF)`.
+- [x] Шаг 2 (тест): `DBNBeatTrackingProcessor` offline (`correct=True`: пик внутри
+      beat-range) и `correct=False` (`argrelmin(state_positions[path], mode='wrap')` +
+      проверка `pointers[path[beats]] == 1`); онлайн: `forward` + `argmax` + правило
+      `next_beat = last_beat + 60/max_bpm` (HMM `forward` нормализует по кадрам в линейном
+      домене, как эталон).
+- [x] Шаг 3 (тест): сверка с `sample.dbn_beat_tracker.txt` — **побитово**: вывод DBN на
+      активациях фикстуры совпадает с файлом командной программы (8/8 биений).
+- [x] Шаг 4 (тест): `BeatTrackingProcessor` (локальный темп) = `tracker`;
+      `BeatDetectionProcessor` (глобальный темп) = `detector`;
+      `CRFBeatDetectionProcessor` = `crf` (+ его кандидатные интервалы).
+- [x] Шаг 5: коммит `feat(features): beat trackers (DBN, tracking, CRF)`.
+
+**Сверка (17 дампов, `tools/dump_beats.py` → `tests/golden/beats/`):**
+
+```
+dbn_default 8, det_dbn 8 (тот же файл), dbn_edge_frames 5, dbn_no_correction 8,
+dbn_threshold_025 7, dbn_threshold_1 0, dbn_empty_path 0,
+dbn_forward_all 5, dbn_forward_frames 5, dbn_forward_frames_noreset 5,
+tracker 8, detector 8, crf 3, crf_intervals 5 — все в пределах 1e-6
+```
+
+Ловушка в читателе `.npy`, вскрытая дампом: пустой результат трекера пишется как массив
+`(0,)`, а счётчик элементов брал `.max(1)` → чтение требовало 8 байт, которых нет
+(`BufferTooShort { need: 136, have: 128 }`). Исправлено: скаляр (0-d) — один элемент,
+массив с нулевой размерностью — ни одного.
 
 #### Task 3.5: Оценка темпа
 

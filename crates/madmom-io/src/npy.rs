@@ -187,7 +187,14 @@ pub struct Header {
 impl Header {
     /// Number of elements described by the header.
     pub fn num_elements(&self) -> usize {
-        self.shape.iter().product::<usize>().max(1)
+        // a 0-d array (a scalar) holds one element, an array with a zero dimension holds
+        // none: `.max(1)` would turn an empty (0,) array into a one-element read and trip
+        // the buffer length check
+        if self.shape.is_empty() {
+            1
+        } else {
+            self.shape.iter().product()
+        }
     }
 
     /// Number of bytes of array data.
@@ -779,6 +786,23 @@ mod tests {
         }
         let c_order = parse_npy(&npy_bytes("<f8", "(2, 3)", &c_data)).expect("c ordered buffer");
         assert_eq!(values, c_order.as_f32().expect("numeric"));
+    }
+
+    #[test]
+    fn an_empty_array_reads_as_empty() {
+        // a tracker that finds nothing writes a (0,) array; treating it as one element
+        // makes the reader demand eight bytes that are not there
+        let bytes = npy_bytes("<f8", "(0,)", &[]);
+        let array = parse_npy(&bytes).expect("an empty array is valid");
+        assert_eq!(array.shape(), &[0]);
+        assert_eq!(array.header.num_elements(), 0);
+        assert!(array.as_f64().expect("numeric").is_empty());
+        // a 0-d scalar still holds exactly one element
+        let mut data = Vec::new();
+        data.extend_from_slice(&2.5f64.to_le_bytes());
+        let scalar = parse_npy(&npy_bytes("<f8", "()", &data)).expect("a scalar is valid");
+        assert!(scalar.shape().is_empty());
+        assert_eq!(scalar.header.num_elements(), 1);
     }
 
     #[test]

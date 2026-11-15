@@ -9,8 +9,15 @@
 //! Defaults are the reference's: 55..215 bpm, `transition_lambda` 100,
 //! `observation_lambda` 16, threshold 0, `correct` on.
 
+use madmom_audio::signal::{signal_frame_f64, smooth_f64};
+use madmom_core::scipy::{argrelmin, Mode};
 use madmom_ml::hmm::{HiddenMarkovModel, ObservationModel, ViterbiResult};
-use ndarray::Array2;
+
+use crate::tempo::{
+    dominant_interval, CombFilterTempoHistogramProcessor, TempoError, TempoHistogramSource,
+    ACT_SMOOTH, HIST_SMOOTH,
+};
+use ndarray::{Array2, ArrayView1};
 
 use crate::beats_hmm::{BeatStateSpace, BeatTransitionModel, RNNBeatTrackingObservationModel};
 
@@ -26,6 +33,10 @@ pub const OBSERVATION_LAMBDA: f64 = 16.0;
 pub const THRESHOLD: f64 = 0.0;
 /// Beats are aligned to the activation peak by default.
 pub const CORRECT: bool = true;
+/// Fraction of a beat interval searched to either side of an assumed beat position.
+pub const LOOK_ASIDE: f64 = 0.2;
+/// Seconds looked at in both directions to determine the local tempo.
+pub const LOOK_AHEAD: f64 = 10.0;
 
 /// Keep only the main segment of activations that reaches `threshold`.
 ///
@@ -38,6 +49,240 @@ pub fn threshold_activations(activations: &[f64], threshold: f64) -> (Vec<f64>, 
     match (first, last) {
         (Some(first), Some(last)) => (activations[first..=last].to_vec(), first),
         _ => (Vec::new(), 0),
+    }
+}
+
+/// Detect beats by looking for the nearest activation peak around an assumed position.
+///
+/// Port of `detect_beats` (the 2013 tracking approach): starting from every position inside
+/// the first beat interval, the beat positions are followed recursively — at each step a
+/// Hamming-weighted window around the assumed position is searched for its maximum — and the
+/// start whose beats carry the most activation wins.
+///
+/// Two details matter: the window is centred on the assumed position (`signal_frame` with a
+/// hop of 1), so a peak can pull the beat to either side, and the positions are **signed**:
+/// near the start of the signal a beat can end up before frame 0, where the reference's
+/// `activations[positions]` then wraps around to the end of the array (Python's negative
+/// indexing). Both are reproduced here.
+pub fn detect_beats(activations: &[f64], interval: usize, look_aside: f64) -> Vec<i64> {
+    let frames_look_aside = std::cmp::max(1, (interval as f64 * look_aside) as usize);
+    let window = madmom_audio::signal::hamming_f64(2 * frames_look_aside);
+    let length = activations.len() as i64;
+
+    let mut positions: Vec<i64> = Vec::new();
+    // the reference recurses; an explicit loop produces the same sequence without the
+    // recursion limit it has to raise for long signals
+    let detect = |start: i64, positions: &mut Vec<i64>| {
+        let mut position = start;
+        loop {
+            let frame = signal_frame_f64(
+                ArrayView1::from(activations),
+                position,
+                frames_look_aside * 2,
+                1.0,
+                0,
+                0.0,
+            );
+            let weighted = frame * &window;
+            // np.argmax: the first maximum wins, and only a maximum beyond the first
+            // sample moves the beat
+            let mut best = 0usize;
+            for (index, value) in weighted.iter().enumerate() {
+                if *value > weighted[best] {
+                    best = index;
+                }
+            }
+            if best > 0 {
+                position = best as i64 + position - frames_look_aside as i64;
+            }
+            positions.push(position);
+            if position + (interval as i64) < length {
+                position += interval as i64;
+            } else {
+                return;
+            }
+        }
+    };
+
+    // try every start position inside the first interval and keep the one whose beats sum
+    // up to the most activation
+    let mut sums = vec![0.0f64; interval.max(1)];
+    for (start, sum) in sums.iter_mut().enumerate() {
+        positions.clear();
+        detect(start as i64, &mut positions);
+        *sum = positions
+            .iter()
+            .map(|position| activations[wrap_index(*position, length)])
+            .sum();
+    }
+    let mut start_position = 0usize;
+    for (index, value) in sums.iter().enumerate() {
+        if *value > sums[start_position] {
+            start_position = index;
+        }
+    }
+    positions.clear();
+    detect(start_position as i64, &mut positions);
+    positions
+}
+
+/// Python's negative indexing: `-1` is the last element.
+fn wrap_index(index: i64, length: i64) -> usize {
+    index.rem_euclid(length) as usize
+}
+
+/// The reference's `BeatTrackingProcessor`: beat tracking with a local tempo estimate.
+///
+/// With `look_ahead` set (the default) the tempo is re-estimated every `look_ahead` seconds
+/// from a window around the current position, so the beats follow a changing tempo; with
+/// `look_ahead = None` (the [`BeatDetectionProcessor`]) a single global interval is used.
+#[derive(Debug, Clone)]
+pub struct BeatTrackingProcessor {
+    look_aside: f64,
+    look_ahead: Option<f64>,
+    fps: f64,
+    histogram: CombFilterTempoHistogramProcessor,
+    hist_smooth: usize,
+    act_smooth: f64,
+}
+
+impl BeatTrackingProcessor {
+    /// Build a processor.
+    pub fn new(
+        look_aside: f64,
+        look_ahead: Option<f64>,
+        fps: f64,
+        histogram: CombFilterTempoHistogramProcessor,
+        hist_smooth: usize,
+        act_smooth: f64,
+    ) -> Self {
+        Self {
+            look_aside,
+            look_ahead,
+            fps,
+            histogram,
+            hist_smooth,
+            act_smooth,
+        }
+    }
+
+    /// Build a processor with the reference's defaults.
+    pub fn with_defaults(look_ahead: Option<f64>, fps: f64) -> Self {
+        Self::new(
+            LOOK_ASIDE,
+            look_ahead,
+            fps,
+            CombFilterTempoHistogramProcessor::with_defaults(fps),
+            HIST_SMOOTH,
+            ACT_SMOOTH,
+        )
+    }
+
+    /// Detect beat positions [seconds].
+    pub fn process(&self, activations: &[f64]) -> Result<Vec<f64>, TempoError> {
+        // the reference smooths with int(fps * act_smooth) frames, i.e. 14 at 100 fps
+        let act_smooth = (self.fps * self.act_smooth) as usize;
+        let activations = smooth_f64(ArrayView1::from(activations), act_smooth)?;
+        let mut detections: Vec<i64> = Vec::new();
+        match self.look_ahead {
+            // a single global tempo for the whole signal
+            None => {
+                let histogram = self.histogram.histogram(activations.view())?;
+                let interval = dominant_interval(&histogram, Some(self.hist_smooth))? as usize;
+                detections = detect_beats(
+                    activations
+                        .as_slice()
+                        .expect("the activations are contiguous"),
+                    interval,
+                    self.look_aside,
+                );
+            }
+            Some(look_ahead) => {
+                let look_ahead_frames = (look_ahead * self.fps) as i64;
+                let mut pos: i64 = 0;
+                while (pos as usize) < activations.len() {
+                    // the local tempo comes from a window around the current position
+                    let window = signal_frame_f64(
+                        activations.view(),
+                        pos,
+                        (look_ahead_frames * 2) as usize,
+                        1.0,
+                        0,
+                        0.0,
+                    );
+                    let histogram = self.histogram.histogram(window.view())?;
+                    let interval = dominant_interval(&histogram, Some(self.hist_smooth))? as usize;
+                    let mut positions = detect_beats(
+                        window.as_slice().expect("the window is contiguous"),
+                        interval,
+                        self.look_aside,
+                    );
+                    for position in positions.iter_mut() {
+                        *position += pos - look_ahead_frames;
+                    }
+                    let next_pos = match detections.last() {
+                        Some(last) => last + self.histogram.min_interval() as i64,
+                        None => 0,
+                    };
+                    positions.retain(|position| *position >= next_pos);
+                    if positions.is_empty() {
+                        return Err(TempoError::NoBeats);
+                    }
+                    // take the detected beat closest to the assumed position
+                    let mut closest = positions[0];
+                    for position in positions.iter() {
+                        if (*position - pos).abs() < (closest - pos).abs() {
+                            closest = *position;
+                        }
+                    }
+                    pos = closest;
+                    detections.push(pos);
+                    pos += interval as i64;
+                }
+            }
+        }
+        // convert to seconds and drop the beats before the signal
+        Ok(detections
+            .into_iter()
+            .map(|frame| frame as f64 / self.fps)
+            .filter(|seconds| *seconds >= 0.0)
+            .collect())
+    }
+}
+
+/// The reference's `BeatDetectionProcessor`: the same tracker with a global tempo.
+#[derive(Debug, Clone)]
+pub struct BeatDetectionProcessor {
+    tracker: BeatTrackingProcessor,
+}
+
+impl BeatDetectionProcessor {
+    /// Build a processor.
+    pub fn new(look_aside: f64, fps: f64, histogram: CombFilterTempoHistogramProcessor) -> Self {
+        Self {
+            tracker: BeatTrackingProcessor::new(
+                look_aside,
+                None,
+                fps,
+                histogram,
+                HIST_SMOOTH,
+                ACT_SMOOTH,
+            ),
+        }
+    }
+
+    /// Build a processor with the reference's defaults.
+    pub fn with_defaults(fps: f64) -> Self {
+        Self::new(
+            LOOK_ASIDE,
+            fps,
+            CombFilterTempoHistogramProcessor::with_defaults(fps),
+        )
+    }
+
+    /// Detect beat positions [seconds].
+    pub fn process(&self, activations: &[f64]) -> Result<Vec<f64>, TempoError> {
+        self.tracker.process(activations)
     }
 }
 
@@ -54,6 +299,12 @@ pub struct DBNBeatTrackingProcessor {
     threshold: f64,
     correct: bool,
     fps: f64,
+    /// Online state (the reference keeps the same fields when `online=True`).
+    counter: i64,
+    last_beat: f64,
+    tempo: f64,
+    strength: f64,
+    beat_counter: i32,
 }
 
 impl DBNBeatTrackingProcessor {
@@ -95,6 +346,11 @@ impl DBNBeatTrackingProcessor {
             threshold,
             correct,
             fps,
+            counter: 0,
+            last_beat: 0.0,
+            tempo: 0.0,
+            strength: 0.0,
+            beat_counter: 0,
         }
     }
 
@@ -203,12 +459,97 @@ impl DBNBeatTrackingProcessor {
                 beats.push(best);
             }
         } else {
-            return Err("correct=false needs scipy's argrelmin (plan task 3.x)");
+            // no peak correction: take the frames with the smallest beat state value, i.e.
+            // the local minima of the state positions along the path, and keep only those
+            // the observation model calls a beat
+            let positions = self.state_space.state_positions();
+            let path_positions: Vec<f64> = result
+                .path
+                .iter()
+                .map(|state| positions[*state as usize])
+                .collect();
+            let minima = argrelmin(&path_positions, 1, Mode::Wrap)
+                .map_err(|_| "argrelmin failed on the state positions")?;
+            let pointers = self.hmm.observation_model().pointers();
+            beats = minima
+                .into_iter()
+                .filter(|frame| pointers[result.path[*frame] as usize] == 1)
+                .collect();
         }
         Ok(beats
             .into_iter()
             .map(|beat| (beat + first) as f64 / self.fps)
             .collect())
+    }
+}
+
+impl DBNBeatTrackingProcessor {
+    /// Reset the online state (the HMM's forward variables included).
+    pub fn reset(&mut self) {
+        self.hmm.reset();
+        self.counter = 0;
+        self.last_beat = 0.0;
+        self.tempo = 0.0;
+        self.strength = 0.0;
+        self.beat_counter = 0;
+    }
+
+    /// Track beats causally with the HMM's forward variables (madmom's `process_online`,
+    /// which is also exported as `process_forward`).
+    ///
+    /// Instead of decoding a path, every frame takes the state with the highest forward
+    /// variable; frames in the beat part of the state space are candidates, and a candidate
+    /// is only reported if it is at least `60 / max_bpm` seconds after the last reported
+    /// beat. That rule is what keeps the forward path from reporting the clusters of
+    /// neighbouring beats it otherwise produces.
+    pub fn process_online(
+        &mut self,
+        activations: &[f64],
+        reset: bool,
+    ) -> Result<Vec<f64>, &'static str> {
+        let matrix = Array2::from_shape_vec((activations.len(), 1), activations.to_vec())
+            .expect("one column holds all activations");
+        let forward = self.hmm.forward(matrix.view(), reset);
+        let num_states = self.state_space.num_states();
+        let pointers = self.hmm.observation_model().pointers();
+        let mut beats: Vec<f64> = Vec::new();
+        for frame in 0..activations.len() {
+            // argmax over the states of this frame; the first maximum wins
+            let mut best_state = 0usize;
+            let mut best = f64::NEG_INFINITY;
+            for state in 0..num_states {
+                if forward[[frame, state]] > best {
+                    best = forward[[frame, state]];
+                    best_state = state;
+                }
+            }
+            if pointers[best_state] != 1 {
+                continue;
+            }
+            let current_beat = (frame as i64 + self.counter) as f64 / self.fps;
+            let next_beat = self.last_beat + 60.0 / self.max_bpm;
+            if current_beat >= next_beat {
+                self.tempo = 60.0 / (current_beat - self.last_beat);
+                self.last_beat = current_beat;
+                beats.push(current_beat);
+            }
+        }
+        self.counter += activations.len() as i64;
+        Ok(beats)
+    }
+
+    /// The reference's alias for the online mode.
+    pub fn process_forward(
+        &mut self,
+        activations: &[f64],
+        reset: bool,
+    ) -> Result<Vec<f64>, &'static str> {
+        self.process_online(activations, reset)
+    }
+
+    /// The last tempo reported by the online mode [bpm].
+    pub fn tempo(&self) -> f64 {
+        self.tempo
     }
 }
 

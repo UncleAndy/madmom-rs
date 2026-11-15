@@ -76,6 +76,10 @@ pub enum TempoError {
     /// `interpolate=True` is not ported (see the module documentation).
     #[error("interpolate=True needs scipy's quadratic B-spline interpolation, not ported yet")]
     InterpolationNotPorted,
+    /// The local tempo search found no beat at all (the reference would index an empty
+    /// array here).
+    #[error("no beat found in the local tempo window")]
+    NoBeats,
 }
 
 /// A tempo/interval histogram: the strengths of the bins and their delays.
