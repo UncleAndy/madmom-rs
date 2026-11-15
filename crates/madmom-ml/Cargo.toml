@@ -19,4 +19,4 @@ serde_json = { workspace = true, optional = true }
 # triton-live pulls the in-process Triton bindings. Requires
 # libtritonserver.so and backends built by tools/build_triton_core.sh
 # and tools/build_onnx_backend.sh; keep it off for golden-mode work.
-triton-live = ["dep:tritonserver-rs"]
+triton-live = []  # task 2.3 maps this to ["dep:tritonserver-rs"]
