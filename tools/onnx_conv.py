@@ -141,11 +141,12 @@ def transpose_layer(layer: Any, data: str, name: str, nodes: list) -> str:
 
 
 def average_layer(layer: Any, data: str, name: str, nodes: list) -> str:
-    """np.mean over one madmom axis; `keepdims` is preserved."""
-    axis = int(np.asarray(layer.axis).reshape(-1)[0])
+    """np.mean over one or more madmom axes; `keepdims` is preserved."""
+    axes = layer.axis if isinstance(layer.axis, (tuple, list, np.ndarray)) else [layer.axis]
+    axes = sorted({_AXIS_IN_NCHW[int(np.asarray(axis).reshape(-1)[0])] for axis in axes})
     keepdims = 1 if getattr(layer, "keepdims", False) else 0
     nodes.append(helper.make_node("ReduceMean", [data], [f"{name}.out"],
-                                  axes=[_AXIS_IN_NCHW[axis]], keepdims=keepdims))
+                                  axes=axes, keepdims=keepdims))
     return f"{name}.out"
 
 
@@ -220,6 +221,12 @@ def feed_forward_layer(layer: Any, data: str, name: str, inits: list, nodes: lis
 
 def build(model: Any, spec: Any) -> Any:
     """Build the ONNX model for a convolutional madmom network."""
+    kind = type(model).__name__
+    if kind != "NeuralNetwork":
+        # Several "cnn" pickles are not networks at all: notes_cnn is a SequentialProcessor
+        # holding convolutions plus a ParallelProcessor. Reading `.layers` off such a wrapper
+        # silently builds a different graph, so refuse instead of guessing.
+        raise unsupported(kind)
     layers = list(getattr(model, "layers", []))
     nodes: list = []
     inits: list = []
@@ -264,8 +271,24 @@ def build(model: Any, spec: Any) -> Any:
             current = feed_forward_layer(layer, current, name, inits, nodes)
         else:
             raise unsupported(kind)
-    if flattened:
-        nodes.append(helper.make_node("Identity", [current], [spec.output_names[0]]))
+    last = type(layers[-1]).__name__ if layers else ""
+    collapses_frames = (
+        last == "AverageLayer"
+        and not getattr(layers[-1], "keepdims", False)
+        and any(int(np.asarray(axis).reshape(-1)[0]) == 0
+                for axis in (layers[-1].axis if isinstance(layers[-1].axis, (tuple, list, np.ndarray))
+                             else [layers[-1].axis]))
+    )
+    if flattened or collapses_frames:
+        # a network that averages over the frame axis answers once per input, not per frame
+        features = int(np.asarray(layers[-1].beta).size) if last == "BatchNormLayer" else 0
+        if collapses_frames and features:
+            inits.append(numpy_helper.from_array(np.array([1, features], dtype=np.int64),
+                                                 "_model_shape"))
+            nodes.append(helper.make_node("Reshape", [current, "_model_shape"],
+                                          [spec.output_names[0]]))
+        else:
+            nodes.append(helper.make_node("Identity", [current], [spec.output_names[0]]))
         return finish(nodes, inits, spec)
     # back to (frames, bins * channels)
     nodes.append(helper.make_node("Squeeze", [current, "_zero_axes"], ["chw"]))
