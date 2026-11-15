@@ -271,7 +271,7 @@ def main(argv):
     v('')
     v('#![allow(clippy::excessive_precision)]')
     v('')
-    v('use madmom_audio::stft::{fft_frequencies, hamming, hanning, stft, WindowFunction};')
+    v('use madmom_audio::stft::{fft_frequencies, hamming, hanning, stft};')
     v('use num_complex::Complex32;')
     v('')
     v('fn complex(values: &[(f32, f32)]) -> Vec<Complex32> {')
