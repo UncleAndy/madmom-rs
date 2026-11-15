@@ -978,13 +978,38 @@ sample rate/dtype вместо тихой пересборки.
 `local_group_delay()`, `ShortTimeFourierTransform` (+ `Processor`),
 `Phase`, `LocalGroupDelay`, `ShortTimeFourierTransformProcessor`.
 
-- [ ] Шаг 1 (тест): doctest-значения `fft_frequencies(4, 44100)`;
+- [x] Шаг 1 (тест): doctest-значения `fft_frequencies(4, 44100)`;
       `stft` без окна/с окном Ханна, `circular_shift=True` (свап половин
       с дополнением нулями при `fft_size > frame_size`), `include_nyquist`.
-- [ ] Шаг 2 (реализация): масштабирование окна `window / iinfo(dtype).max`
+- [x] Шаг 2 (реализация): масштабирование окна `window / iinfo(dtype).max`
       при целочисленном сигнале (D5) — иначе паритет невозможен.
-- [ ] Шаг 3 (тест): сверка `stft` с `tests/golden/stft_2048.npy` (`≤1e-5`).
-- [ ] Шаг 4: коммит `feat(audio): short-time Fourier transform`.
+- [x] Шаг 3 (тест): сверка `stft` с `tests/golden/stft_2048.npy` (`≤1e-5`).
+- [x] Шаг 4: коммит `feat(audio): short-time Fourier transform`.
+
+**Статус: выполнено (2026-11-15).** `crates/madmom-audio/src/stft.rs`: `stft()`,
+`ShortTimeFourierTransform`, `ShortTimeFourierTransformProcessor`, `fft_frequencies`,
+`phase`, окна `hanning`/`hamming` (формулы NumPy: `0.5-0.5cos`, `0.54-0.46cos`), `Window`
+(функция/массив/нет) и правило масштабирования окна.
+
+Числа (прогнано здесь, `cargo test -p madmom-audio`):
+
+- сверка с дампом `tests/golden/sample.stft.npy` (281 × 1024, complex64):
+  **max |Δ| = 2.910e-11** при допуске §4.2 = 1e-5, то есть на шесть порядков внутри;
+- тест-ловушка: то же окно **без** деления на 32767 даёт `max |Δ| = 4.644e6` — то есть
+  забытое масштабирование видно, а не «правдоподобно» уезжает;
+- 3 теста на векторах, снятых с madmom, закрывают то, чего нет в дампе: `fft_frequencies`
+  (5,10), (4,44100), (1024,44100); окна 1/2/3/4/8/2048; случаи `include_nyquist`,
+  `circular_shift`, `fft_size=16 > кадра`, `fft_size=4 < кадра`, кадры float без масштабирования.
+
+Важные детали, зафиксированные в коде: madmom считает **в float64** (int16 × float64-окно)
+и только результат кладёт в `complex64`, поэтому FFT здесь тоже в `f64`; `num_bins = fft_size/2`
+(Найквист выбрасывается, 2048 → 1024 бина); при `circular_shift` половины кадра меняются
+до FFT, а при `fft_size > frame_size` нули вставляются **между** половинами; при
+`fft_size < frame_size` кадр **обрезается** (`fftpack.fft`-семантика) — это нашёл
+вектор-тест, до него реализация падала на выходе за границы.
+
+Попутно: `madmom-io::npy` научился читать `complex64/128` (`as_complex32`); ошибка в
+`size_in_bytes` (complex64 как 4 байта вместо 8) была поймана тем же тестом.
 
 #### Task 1.4: `filters` (фильтрбанки)
 
