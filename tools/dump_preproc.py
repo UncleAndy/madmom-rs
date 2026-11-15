@@ -22,6 +22,25 @@ from pathlib import Path
 
 import numpy as np
 
+def add_madmom_to_path(madmom_path: Path) -> None:
+    """Make the reference implementation importable from the submodule.
+
+    madmom is not installed: the checkout is referenced in place, so its parent
+    directory has to be on sys.path (``third_party/madmom`` contains the
+    ``madmom`` package). The built extensions must live next to it, see
+    tools/build_madmom_ext.py.
+    """
+    root = madmom_path.resolve()
+    if not (root / "madmom" / "__init__.py").is_file():
+        raise SystemExit(
+            "%s does not look like a madmom checkout\n"
+            "run: git submodule update --init --recursive" % root
+        )
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+
+
 
 def groups():
     """Map a group name to a factory of the public madmom processor."""
@@ -110,6 +129,7 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list groups and exit")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    add_madmom_to_path(args.madmom_path)
 
     table = groups()
     selected = args.groups or list(table)

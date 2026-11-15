@@ -22,6 +22,25 @@ from pathlib import Path
 
 import numpy as np
 
+def add_madmom_to_path(madmom_path: Path) -> None:
+    """Make the reference implementation importable from the submodule.
+
+    madmom is not installed: the checkout is referenced in place, so its parent
+    directory has to be on sys.path (``third_party/madmom`` contains the
+    ``madmom`` package). The built extensions must live next to it, see
+    tools/build_madmom_ext.py.
+    """
+    root = madmom_path.resolve()
+    if not (root / "madmom" / "__init__.py").is_file():
+        raise SystemExit(
+            "%s does not look like a madmom checkout\n"
+            "run: git submodule update --init --recursive" % root
+        )
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+
+
 STAGES = ("signal", "frames", "stft", "spec", "filt", "logspec", "diff",
           "features", "activations", "path", "beats")
 
@@ -83,6 +102,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--audio", required=True, type=Path, help="input audio file")
+    parser.add_argument("--madmom-path", type=Path, default=Path("third_party/madmom"),
+                        help="checkout of the reference implementation (built in place)")
     parser.add_argument("--out", type=Path, default=Path("tests/golden"),
                         help="output directory for the stage dumps")
     parser.add_argument("--stages", nargs="+", default=list(STAGES),
@@ -98,6 +119,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="print the plan without touching madmom")
     args = parser.parse_args()
+    add_madmom_to_path(args.madmom_path)
 
     if args.dry_run:
         print("would dump stages:", ", ".join(args.stages))
