@@ -280,6 +280,21 @@ def group_of(pickle_path: str | Path) -> str:
     return re.sub(r"_?\d+$", "", stem)
 
 
+def input_width_of(model: Any) -> int | None:
+    """Input width of a network, taken from the weights of its first layer.
+
+    FEATURE_WIDTHS is a hand-written table and had chroma_dnn at 12 while the pickled
+    network expects 1575, so the graph and its config.pbtxt disagreed with the model. The
+    weights are the authority; the table stays as the fallback for families whose first
+    layer does not carry an (in, out) matrix.
+    """
+    for info in layers_of(model):
+        shape = info.tensors.get("weights")
+        if shape and len(shape) == 2:
+            return int(shape[0])
+    return None
+
+
 def spec_for(pickle_path: str | Path, family: str | None = None) -> ModelSpec:
     """Model spec of the ONNX model built from `pickle_path`."""
     name = Path(pickle_path).stem
@@ -317,6 +332,8 @@ MODEL_GROUPS = tuple(sorted(FEATURE_WIDTHS))
 # environment. They must pass `--validate` (onnx.checker + numeric comparison
 # against the reference activations) before they are trusted.
 
+# Highest IR version the vendored ONNX Runtime (1.18.1, in the Triton backend) accepts.
+IR_VERSION = 10
 OPSET = 17
 
 
@@ -468,6 +485,10 @@ def _finish_graph(helper, onnx, nodes, initializers, spec: ModelSpec, output_wid
         initializer=initializers,
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
+    # Pin the IR version: helper.make_model stamps whatever the installed onnx package
+    # declares (13 with onnx 1.21), while the ONNX Runtime vendored into the Triton backend
+    # is 1.18.1 and refuses anything above IR 10 with "Unsupported model IR version".
+    model.ir_version = IR_VERSION
     model.doc_string = "converted from madmom pickle by tools/convert_to_onnx.py"
     return model
 
@@ -478,11 +499,43 @@ BUILDERS = {
 }
 
 
+def output_width_of(model: Any) -> int | None:
+    """Output width of a feed-forward network, from the weights of its last layer."""
+    width = None
+    for info in layers_of(model):
+        shape = info.tensors.get("weights")
+        if shape and len(shape) == 2:
+            width = int(shape[1])
+    return width
+
+
+def with_model_width(spec: ModelSpec, model: Any) -> ModelSpec:
+    """`spec` with the input width taken from the weights of the model.
+
+    Callers that write a `config.pbtxt` must use the returned spec: the width in the table
+    and the width the graph is built for have to be the same number.
+    """
+    width = input_width_of(model)
+    if width is None or len(spec.input_dims) < 2 or spec.input_dims[1] == width:
+        return spec
+    dims = list(spec.input_dims)
+    dims[1] = width
+    out = spec.output_dims
+    if spec.family == "feedforward" and out == ((-1, 1),):
+        # chroma_dnn answers with 12 chroma bins, not one value: the default has to give way
+        # to the model whenever the last layer says something else.
+        produced = output_width_of(model)
+        if produced is not None:
+            out = ((-1, produced),)
+    return ModelSpec(**{**spec.__dict__, "input_dims": tuple(dims), "output_dims": out})
+
+
 def build_model(model: Any, spec: ModelSpec) -> Any:
     """Build the ONNX model for a loaded madmom pickle."""
     family = model_family(model)
     if family != spec.family:
         spec = ModelSpec(**{**spec.__dict__, "family": family})
+    spec = with_model_width(spec, model)
     if family in ("lstm", "blstm", "gru", "bgru", "rnn", "brnn"):
         return _build_recurrent_family(model, family, spec)
     if family in BUILDERS:

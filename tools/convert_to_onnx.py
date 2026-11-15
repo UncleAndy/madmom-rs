@@ -60,6 +60,7 @@ def convert_one(pickle_path: Path, dst: Path, *, validate: bool, dry_run: bool) 
         return row
     family = onnx_spec.model_family(model)
     spec = onnx_spec.spec_for(pickle_path, family=family)
+    spec = onnx_spec.with_model_width(spec, model)
     row.update(family=family, layers=len(onnx_spec.layers_of(model)))
     if dry_run:
         row.update(status="planned", config=spec.config_pbtxt())
