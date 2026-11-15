@@ -1205,6 +1205,14 @@ Create `tools/dump_preproc.py`; Test `crates/madmom-features/tests/preproc.rs`.
   решение владельца**).
 - `Server::new(options)` — `async`. Достаточно `futures::executor::block_on` (tokio не нужен,
   если не хочется тянуть рантайм; `futures` уже в зависимостях биндингов).
+- `build.rs` биндингов гоняет **bindgen** по `core/include/triton/core/tritonserver.h`
+  (значит нужен `libclang` — в devShell он есть, `LIBCLANG_PATH` задан в `flake.nix`) и выдаёт
+  только `cargo:rustc-link-lib=dylib=tritonserver`, **без** `rustc-link-search`: путь к ядру
+  надо передать самому — `RUSTFLAGS="-L $PWD/third_party/triton-runtime/lib"` при сборке с
+  фичей `triton-live` (в рантайме — `LD_LIBRARY_PATH` на тот же каталог, `tools/triton_env.sh`).
+- Побочный эффект `build.rs`: при отсутствии заголовка он сам делает
+  `git submodule update --init --recursive` — в песочнице это лишний шаг, но вреда не несёт
+  (сабмодуль `core` уже выкачан, план Шаг 1).
 
 #### Task 2.3: Triton in-process (`tritonserver-rs` 0.4.1)
 
