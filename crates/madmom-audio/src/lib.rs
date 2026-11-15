@@ -6,6 +6,8 @@
 //! - [`signal`] — `madmom/audio/signal.py`: samples with metadata, framing, and the
 //!   scalar signal functions (smoothing, gain, normalize, remix, rescale, trim,
 //!   energy, RMS, sound pressure level).
+//! - [`stft`] — `madmom/audio/stft.py`: the short-time Fourier transform, its windows
+//!   and the bin frequencies.
 //!
 //! Numeric fidelity: samples are held as `f32` together with the [`signal::DType`]
 //! they were loaded as, because madmom's DSP decisions (window scaling by
@@ -15,3 +17,4 @@
 #![deny(missing_docs)]
 
 pub mod signal;
+pub mod stft;

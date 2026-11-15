@@ -11,6 +11,8 @@ repository.workspace = true
 madmom-core = { path = "../madmom-core" }
 ndarray.workspace = true
 thiserror.workspace = true
+num-complex.workspace = true
+rustfft.workspace = true
 
 [dev-dependencies]
 # the golden reference dumps are NumPy .npy files, so the tests read them with

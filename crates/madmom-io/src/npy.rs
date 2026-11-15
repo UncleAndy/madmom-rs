@@ -1,6 +1,6 @@
 //! Readers for NumPy `.npy` and `.npz` files.
 //!
-//! Deliberately dependency free (std only): the parity fixtures shipped with
+//! Deliberately free of C dependencies: the parity fixtures shipped with
 //! madmom are read on every test run, so the reader must not drag in C
 //! libraries or a compression stack. The observations this implements were
 //! verified against the actual fixtures:
@@ -17,6 +17,8 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use num_complex::Complex32;
 
 /// Result type used by this module.
 pub type Result<T> = std::result::Result<T, NpyError>;
@@ -119,6 +121,10 @@ pub enum DType {
     U32,
     /// `<u8`
     U64,
+    /// `<c8` — complex64 (what madmom's STFT dumps use).
+    C64,
+    /// `<c16` — complex128.
+    C128,
     /// `|O` — pickled Python objects.
     Object,
 }
@@ -136,6 +142,8 @@ impl DType {
             "<u2" => DType::U16,
             "<u4" => DType::U32,
             "<u8" => DType::U64,
+            "<c8" => DType::C64,
+            "<c16" => DType::C128,
             "|O" => DType::Object,
             other => return Err(NpyError::UnsupportedDtype(other.to_string())),
         })
@@ -145,7 +153,9 @@ impl DType {
     pub fn size_in_bytes(self) -> usize {
         match self {
             DType::F32 | DType::I32 | DType::U32 => 4,
-            DType::F64 | DType::I64 | DType::U64 => 8,
+            // a complex element is *two* reals: complex64 is 8 bytes, not 4
+            DType::F64 | DType::I64 | DType::U64 | DType::C64 => 8,
+            DType::C128 => 16,
             DType::I16 | DType::U16 => 2,
             DType::U8 => 1,
             DType::Object => 0,
@@ -264,7 +274,47 @@ impl NpyArray {
                 })
                 .collect(),
             DType::U8 => self.data.iter().map(|b| *b as f32).collect(),
+            DType::C64 | DType::C128 => {
+                return Err(NpyError::UnsupportedDtype(format!(
+                    "{:?} as f32 (use as_complex32)",
+                    self.header.dtype
+                )))
+            }
             DType::Object => return Err(NpyError::ObjectArray),
+        };
+        Ok(out)
+    }
+
+    /// Reads a complex array as `Complex32` values.
+    ///
+    /// The STFT dumps are `complex64` (`<c8`), so this is the dtype the audio stages
+    /// compare against. Interleaved little-endian re/im pairs, as NumPy stores them.
+    pub fn as_complex32(&self) -> Result<Vec<Complex32>> {
+        let out = match self.header.dtype {
+            DType::C64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| {
+                    let re = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    let im = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+                    Complex32::new(re, im)
+                })
+                .collect(),
+            DType::C128 => self
+                .data
+                .chunks_exact(16)
+                .map(|c| {
+                    let re = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                    let im =
+                        f64::from_le_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
+                    Complex32::new(re as f32, im as f32)
+                })
+                .collect(),
+            other => {
+                return Err(NpyError::UnsupportedDtype(format!(
+                    "{other:?} as complex32"
+                )))
+            }
         };
         Ok(out)
     }
