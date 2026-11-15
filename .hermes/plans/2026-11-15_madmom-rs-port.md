@@ -682,16 +682,29 @@ pub fn assert_array_close(a: &ArrayD<f32>, b: &ArrayD<f32>, atol: f32, rtol: f32
       absl, re2, c-ares, prometheus-cpp, googletest) из `triton-inference-server/third_party`
       через FetchContent/ExternalProject → нужна сеть при конфигурации и ~гигабайты
       сборки. Герметичная nix-деривация для этого — отдельная задача (см. §9, вопрос 2).
-- [ ] Шаг 3: **ONNX Runtime backend** (без него сервер не загрузит ONNX-модели):
-      `onnxruntime_backend` ветки r24.08 клонируется в `third_party/` (или добавляется
-      сабмодулем — решает владелец). **ONNX Runtime вендорим, системный не используем**
-      (решение владельца): либо backend собирает ORT сам (тогда `.so` самодостаточен),
-      либо мы пре-выбираем официальный ORT-тарболл (`onnxruntime-linux-x64-<ver>.tgz`
-      с фиксированным хешем) и указываем backend'у путь к нему. Имена CMake-переменных
-      backend'а (`TRITON_ONNXRUNTIME_*` и т.п.) взять из его `cmake/` после клонирования —
-      здесь они не выдуманы (сети для сверки у меня нет). Цена: сборка ORT из исходников —
-      десятки минут и гигабайты; пре-выбранный тарболл — минуты. Результат —
-      `libtriton_onnxruntime.so` (+ вендоренные ORT-либы) в `third_party/triton-runtime/backends/`.
+- [ ] Шаг 3: **ONNX Runtime backend** — сабмодуль `third_party/onnxruntime_backend`
+      (решение владельца). **Ветку обязательно выровнять по ядру:**
+      `git -C third_party/onnxruntime_backend checkout r24.08` — сейчас сабмодуль стоит на
+      `main` (`313143a`, 2026-11-05), а `main` требует CMake ≥ 3.31.8 и C++20, тогда как
+      `core` у нас r24.08 (C++17, C-API 1.34, к которому привязан `tritonserver-rs`).
+      Ветка `origin/r24.08` в репозитории есть.
+- [ ] Шаг 3a: **ONNX Runtime вендорим** (решение владельца; системный ORT не используем).
+      Проверенный по `CMakeLists.txt` backend'а набор возможностей:
+      (а) внешний ORT — `-DTRITON_ONNXRUNTIME_INCLUDE_PATHS=…/include`
+      `-DTRITON_ONNXRUNTIME_LIB_PATHS=…/lib` (внутри — `find_library(onnxruntime … REQUIRED)`);
+      (б) `-DTRITON_BUILD_ONNXRUNTIME_VERSION=<ver>` + `-DTRITON_BUILD_CONTAINER=<image>` —
+      сборка ORT **в контейнере** (docker недоступен в этом окружении);
+      (в) `-DTRITON_ONNXRUNTIME_PACKAGE_URL=<zip>` — скачивание готового пакета ORT
+      (`cmake/download_onnxruntime.cmake`: ждёт zip с `VERSION_NUMBER`, `include/`, `lib/`,
+      сверяет версию с `TRITON_BUILD_ONNXRUNTIME_VERSION`).
+      Выбираем **(а) + наш пиннинг**: официальный ORT-релиз скачиваем один раз (URL + sha256
+      фиксируем в `tools/build_onnx_backend.sh`), распаковываем в
+      `third_party/triton-runtime/onnxruntime/` и передаём пути. Версию ORT брать из
+      бэкенда r24.08 (её фиксирует его CI/Dockerfile), а не из головы.
+      Флаги: `-DTRITON_ENABLE_GPU=OFF` (иначе `TRITON_ENABLE_ONNXRUNTIME_TENSORRT=ON`
+      падает с FATAL_ERROR, т.к. требует GPU), `-DTRITON_ENABLE_STATS=OFF`.
+      Результат — `libtriton_onnxruntime.so` (+ вендоренные ORT-либы) в
+      `third_party/triton-runtime/backends/`.
 - [ ] Шаг 4: `tools/triton_env.sh` — экспорт `MADMOM_MODEL_REPO`,
       `MADMOM_TRITON_BACKENDS=$PWD/third_party/triton-runtime/backends`,
       `LD_LIBRARY_PATH=$PWD/third_party/triton-runtime/lib` (нужен и для линковки
@@ -1192,7 +1205,7 @@ Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тест�
 | R14 | Задержка online-инференса (1 кадр за вызов при 100 fps) | инференс локальный (in-process, не сеть), но вызов на кадр дорог: замер в Task 2.3 шаг 6; при провале — батчинг N кадров |
 | R15 | Не-NN модели: `ConditionalRandomField` (аккорды) и `GMM` (паттерны) | **решено**: перенос в ONNX (решение 3). Наш объём — контракт (batch на файл; выход: последовательность состояний для CRF, log-плотности для GMM) и приёмка; математика не портируется |
 | R16 | Сборка Triton из исходников: `TRITON_CORE_HEADERS_ONLY=OFF` + третьи стороны (gRPC/protobuf/absl/re2/prometheus) тянутся из `triton-inference-server/third_party` при конфигурации; отдельно нужен ONNX Runtime backend и `libclang` для bindgen | **решено: CPU-only + сборка из сабмодуля `core`** (Task 0.7). Остатки: сборка требует сети и времени; герметичная nix-деривация не сделана (сначала devShell-путь + `tools/build_triton_core.sh`); ORT-бэкенд линкуется с системным ONNX Runtime |
-| R16a | Отсутствие герметичной nix-сборки Triton: CI на чистой машине не соберёт либу сам | принять как ограничение v1 (сборка — разовая операция с сетью, артефакт в `third_party/triton-runtime`, gitignored) либо отдельной задачей сделать derivation с предвыборкой `third_party`/`common` |
+| R16a | Герметичность сборки Triton | **решено: вариант D** — сейчас вариант A (разовая сборка в devShell, артефакт в gitignored `third_party/triton-runtime`), а когда/если понадобится CI на чистой машине — C (вендоренные бинарники из NGC-образа с хешами) или B (nix-деривация с предвыборкой входов). Варианты расписаны в §9 |
 | R17 | Проверка сборки в этой среде невозможна: `cargo` в sandbox отсутствует, сети нет (crates не скачать), либы Triton нет | сборка и прогоны — на хосте владельца; в плане даны точные команды, выдуманных результатов нет |
 
 ## 7. Что не портируется
@@ -1268,22 +1281,28 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
 6. **CPU-only**: `default-features = false`, `pinned_memory_pool_byte_size(0)`,
    `instance_group KIND_CPU`; GPU — отдельной фичей позже.
 7. **`libtritonserver.so` и ONNX Runtime backend — собираем из исходников**
-   (`core` = сабмодуль, Task 0.7), не контейнер. Метрики/статистика/трассировка
-   выключены, теги репозиториев r24.08. **ONNX Runtime — вендоренный**, системный
-   (nixpkgs) не используется: либо backend собирает ORT сам, либо пре-выборка
-   официального ORT-тарболла с фиксированным хешем.
-8. **Конвертер ONNX** (`tools/convert_to_onnx.py`) пишем и доводим до зелёных тестов
+   (сабмодули `third_party/tritonserver-rs/core` и `third_party/onnxruntime_backend`),
+   не контейнер. Метрики/статистика/трассировка выключены, теги r24.08 (бэкенд тоже
+   переводится на `r24.08` — сейчас он на `main`, что не совпадает с ядром).
+   **ONNX Runtime — вендоренный**, системный (nixpkgs) не используется: официальный
+   ORT-релиз скачивается один раз с фиксированным URL+sha256 и подключается через
+   `TRITON_ONNXRUNTIME_INCLUDE_PATHS`/`_LIB_PATHS`.
+8. **Герметичность сборки Triton — вариант D** (решение владельца): сейчас A (разовая
+   сборка в devShell), воспроизводимость для CI добавляется позже вариантом C или B
+   (варианты — в списке ниже).
+9. **Конвертер ONNX** (`tools/convert_to_onnx.py`) пишем и доводим до зелёных тестов
    **до Фазы 2** (Task 0.8) — иначе Task 2.4 нечего принимать.
-9. **ONNX-репозиторий** — `third_party/madmom-models-onnx/models` (§2.1).
-10. **Мёртвая запись** `third_party/madmom_models` в `.gitmodules` удалена (коммит
+10. **ONNX-репозиторий** — `third_party/madmom-models-onnx/models` (§2.1).
+11. **Мёртвая запись** `third_party/madmom_models` в `.gitmodules` удалена (коммит
     `019e1bf`); модели приходят из вложенного сабмодуля `madmom/models`.
-11. **`madmom-eval`** — отложен, вне первого релиза; CLI первого релиза — 24 программы.
+12. **`madmom-eval`** — отложен, вне первого релиза; CLI первого релиза — 24 программы.
 
 **Осталось решить:**
 
-1. **ONNX Runtime для backend'а:** системный из nixpkgs (`nixpkgs#onnxruntime`) или
-   пусть backend собирает ORT сам (дольше, по умолчанию с CUDA). Я заложил системный;
-   подтвердить версию ORT, совместимую с backend'ом r24.08.
+1. **Версия вендоренного ONNX Runtime:** берётся из бэкенда r24.08 (его CI/Dockerfile
+   её фиксирует) — на первой сборке выпишу конкретную версию и sha256 в
+   `tools/build_onnx_backend.sh`; если у тебя есть предпочтение (например, ровно та,
+   что в образе `tritonserver:24.08`) — скажи.
 2. **Герметичность сборки Triton** (R16a). Варианты (нужен выбор владельца):
 
    - **A. Разовая сборка в devShell** (что уже в Task 0.7): сеть разрешена, артефакт в
