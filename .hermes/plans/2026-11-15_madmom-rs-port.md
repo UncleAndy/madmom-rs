@@ -1265,7 +1265,28 @@ GRU: `h = ug*cell + (1-ug)*h_prev`). Двунаправленные слои и�
 `onsets_rnn_1` 2.7e-7, `notes_brnn` 1.6e-6, `downbeats_bgru_harmonic_0` 4.8e-7,
 `beats_lstm_1` 8.2e-8, `beats_blstm_1` 6.7e-8.
 
-Полная конвертация: **70 из 92** (было 1). Осталось 22: `cnn` 10, `tcn` 8, `crf` 2, `gmm` 2.
+Полная конвертация: **80 из 92** (было 1). Осталось 12: `tcn` 8, `crf` 2, `gmm` 2.
+
+#### Свёрточные (`cnn`) — построитель есть, сверена одна модель
+
+`tools/onnx_conv.py`: данные один раз переводятся в NCHW, свёртки с паддингом/шагом madmom,
+при `Reshape`/`FeedForward` — переход в `(кадры, бины * каналы)`. Поддержаны Conv, BatchNorm
+(как scale/shift), MaxPool (`maximum_filter` + срез madmom = valid-pool), Pad, Transpose,
+Average, Reshape, Stride.
+
+**Главная ловушка:** `scipy.ndimage.convolve` — свёртка (переворачивает ядро), ONNX `Conv` —
+корреляция. Без переворота граф работает и молча отдаёт зеркальные признаки; закреплено тестом
+`tools/tests/test_conv.py`.
+
+Численно сверено: `chords_cnnfeat` — max abs diff 2.0e-06, cosine 1.000000. Остальные девять
+(`key_cnn*`, `notes_cnn*`, `onsets_cnn`) **пока не сверены**: у них внутри сети меняется ранг и
+порядок слоёв (BatchNorm первым слоем, Reshape/Transpose/Average в середине), и построитель,
+верный для простой цепочки Conv→BN→MaxPool, на них ещё не проверен. Конвертируются все 10, но
+числам до сверки доверять нельзя.
+
+Входные формы (замерены по процессорам madmom, а не по таблице): `chords_cnnfeat` (113, 1),
+`key_cnn*` (105, 1), `notes_cnn*` (144, 1), `onsets_cnn` (80, **3**). Таблица `FEATURE_WIDTHS`
+была неверна для всех них (стояло 3), поэтому введена отдельная `CNN_INPUTS`.
 
 #### Task 2.3: Triton in-process (`tritonserver-rs` 0.4.1)
 

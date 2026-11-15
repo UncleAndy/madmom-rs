@@ -223,6 +223,15 @@ def build(model: Any, spec: Any) -> Any:
     layers = list(getattr(model, "layers", []))
     nodes: list = []
     inits: list = []
+    inits.extend([
+        numpy_helper.from_array(np.array(0, dtype=np.int64), "_zero_i64"),
+        numpy_helper.from_array(np.array([1], dtype=np.int64), "_one_i64"),
+        numpy_helper.from_array(np.array([2**62], dtype=np.int64), "_max_i64"),
+        numpy_helper.from_array(np.array([-1], dtype=np.int64), "_neg_one_i64"),
+        numpy_helper.from_array(np.array([0], dtype=np.int64), "_zero_axes"),
+        numpy_helper.from_array(np.array(0, dtype=np.int64), "_zero_i64_scalar"),
+        numpy_helper.from_array(np.array([3], dtype=np.int64), "_three_i64"),
+    ])
     _pair_dim = int(np.asarray(spec.input_dims[-1]))
     # (frames, bins, channels) -> (1, channels, frames, bins)
     nodes.append(helper.make_node("Transpose", [spec.input_name], ["nchw_t"], perm=[2, 0, 1]))
@@ -266,15 +275,6 @@ def build(model: Any, spec: Any) -> Any:
     nodes.append(helper.make_node("ReduceProd", ["dims"], ["prod"], keepdims=1))
     nodes.append(helper.make_node("Concat", ["_neg_one_i64", "prod"], ["target"], axis=0))
     nodes.append(helper.make_node("Reshape", ["fbch", "target"], [spec.output_names[0]]))
-    inits.extend([
-        numpy_helper.from_array(np.array(0, dtype=np.int64), "_zero_i64"),
-        numpy_helper.from_array(np.array([1], dtype=np.int64), "_one_i64"),
-        numpy_helper.from_array(np.array([2**62], dtype=np.int64), "_max_i64"),
-        numpy_helper.from_array(np.array([-1], dtype=np.int64), "_neg_one_i64"),
-        numpy_helper.from_array(np.array([0], dtype=np.int64), "_zero_axes"),
-        numpy_helper.from_array(np.array(0, dtype=np.int64), "_zero_i64_scalar"),
-        numpy_helper.from_array(np.array([3], dtype=np.int64), "_three_i64"),
-    ])
     return finish(nodes, inits, spec)
 
 

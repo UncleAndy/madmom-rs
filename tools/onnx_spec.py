@@ -257,6 +257,28 @@ class ModelSpec:
 # Directory name -> (input feature count, number of outputs). Feature counts are
 # the widths of the feature matrices the madmom preprocessors build (they are
 # re-derived by tools/dump_preproc.py, which is the authority).
+# Input shape of the convolutional networks: (bins, channels). The weight tensors cannot
+# tell these apart (a Conv weight is (channels, features, kt, kf), so the first two entries
+# are channels and filters, not bins), and the hand-written FEATURE_WIDTHS table was wrong
+# for every one of them. Measured from the madmom processor that feeds each network, by
+# intercepting the input of its NeuralNetwork/NeuralNetworkEnsemble call; see
+# tools/tests/test_conv.py, which pins these numbers against the same processors.
+CNN_INPUTS: dict[str, tuple[int, int]] = {
+    "chords_cnnfeat": (113, 1),
+    "key_cnn": (105, 1),
+    "notes_cnn": (144, 1),
+    "onsets_cnn": (80, 3),
+}
+
+
+def cnn_inputs(group: str) -> tuple[int, int] | None:
+    """(bins, channels) for a convolutional model group, e.g. `key_cnn_3`."""
+    if group in CNN_INPUTS:
+        return CNN_INPUTS[group]
+    stem = group.rsplit("_", 1)[0]
+    return CNN_INPUTS.get(stem)
+
+
 FEATURE_WIDTHS: dict[str, int] = {
     "beats_blstm": 162,   # 3 frame sizes x (6 bands * (1 spec + 1 diff)) = 3 * 27 * 2
     "beats_lstm": 162,
@@ -301,7 +323,14 @@ def spec_for(pickle_path: str | Path, family: str | None = None) -> ModelSpec:
     group = group_of(pickle_path)
     width = FEATURE_WIDTHS.get(group, 0)
     dims: tuple[int, ...]
-    if family in ("cnn", "tcn"):
+    if family == "cnn":
+        measured = cnn_inputs(group)
+        if measured is None:
+            raise UnsupportedLayer(
+                "%s: the input shape of this convolutional network has not been measured "
+                "against its madmom processor yet" % name)
+        dims = (-1, measured[0], measured[1])
+    elif family == "tcn":
         dims = (-1, width, 1)
     elif family == "blstm" and group.endswith("downbeats_blstm"):
         dims = (-1, width, 2)
@@ -515,6 +544,9 @@ def with_model_width(spec: ModelSpec, model: Any) -> ModelSpec:
     Callers that write a `config.pbtxt` must use the returned spec: the width in the table
     and the width the graph is built for have to be the same number.
     """
+    if spec.family in ("cnn", "tcn"):
+        # a Conv weight is (channels, features, kt, kf): neither entry is the input width
+        return spec
     width = input_width_of(model)
     if width is None or len(spec.input_dims) < 2 or spec.input_dims[1] == width:
         return spec
