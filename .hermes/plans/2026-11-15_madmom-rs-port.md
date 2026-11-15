@@ -936,7 +936,7 @@ madmom для скалярных функций. По ходу всплыл де
 **Files:** Create `crates/madmom-io/src/audio.rs`; Test `crates/madmom-io/tests/audio.rs`
 (порт `tests/test_io_audio.py`, 27 тестов).
 
-- [ ] Шаг 1 (тест): `load_wave_file` для `sample.wav`, `sample_22050.wav`,
+- [x] Шаг 1 (тест): `load_wave_file` для `sample.wav`, `sample_22050.wav`,
       `stereo_sample.wav` (int16, num_channels, sample_rate); ошибка
       `LoadAudioFileError` для `foo_bar.wav`; `write_wave_file` round-trip.
 - [ ] Шаг 2 (тест): `load_audio_file` dispatch: `.wav` без ресемплинга → свой
@@ -946,6 +946,28 @@ madmom для скалярных функций. По ходу всплыл де
 - [ ] Шаг 4 (реализация): `_ffmpeg_call` — аргументы в том же порядке
       (`-v quiet -y`, `-ss`, `-f`, `-t`, `-ac`, `-ar`, `-af pan=mono|c0=cN`).
 - [ ] Шаг 5: коммит `feat(io): wav + ffmpeg audio loading`.
+
+**Статус: половина сделана (2026-11-15).** `crates/madmom-io/src/audio.rs`: собственный
+RIFF/WAVE-ридер с конвенциями scipy (`wavfile.read`), потому что популярные крейты дают
+другие числа: 8-бит — **беззнаковый**, 24-бит — как `int32` со знаковым расширением и
+**без** масштабирования, `WAVE_FORMAT_EXTENSIBLE` — по под-формату GUID (тег лежит по
+смещению 24, не 18: после 18 байт `WAVEFORMATEX` идут valid-bits, channel-mask и только
+потом сам GUID). Плюс обрезка `start`/`stop` с округлением как у эталона
+(`int(s*rate)`, `stop = min(len, int(stop*rate))`) и отказ при несовпадении
+sample rate/dtype вместо тихой пересборки.
+
+Проверено здесь побитово: `cargo test -p madmom-io --test audio_golden` прогоняет 9 кейсов
+дампов madmom (5 файлов + 4 варианта обрезки, включая стерео) и требует совпадения
+формата, формы, частоты и **всех** сэмплов — совпало всё. Плюс 7 unit-тестов на парсер
+(8/16/24-бит, расширяемый заголовок, стерео, отказ на чужих форматах). Всего в крейте
+14 unit + 1 golden.
+
+Осталось по задаче (вторая половина): путь ffmpeg — `ffmpeg_fmt`/`ffmpeg_call`
+(**порядок аргументов — часть контракта**: `-ss` до `-i`, `-af volume=replaygain=...` после,
+`-f fmt`, `-t`, `-ac`, `pan=mono|c0=cN`, `-ar`), `decode_to_memory`/`decode_to_pipe`,
+`get_file_info`, ReplayGain-фикстуры (`stereo_sample_rg.flac`, `stereo_chirp_rg.flac`) и
+не-потоковый `.m4a`. ffmpeg в песочнице есть (`/run/current-system/sw/bin/ffmpeg`), так что
+эта половина тоже проверяема здесь: эталон снимается у самого madmom при том же бинаре.
 
 #### Task 1.3: `stft`
 
