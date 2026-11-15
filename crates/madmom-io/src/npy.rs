@@ -207,6 +207,11 @@ impl NpyArray {
     }
 
     /// Reinterprets the data as `f32`, converting from other numeric types.
+    /// Reads the array as `f32` values.
+    ///
+    /// Every numeric dtype is converted (they are what audio arrives in: `.npy` dumps
+    /// of int16 signals and float32 features alike); object arrays are refused, since
+    /// a pickled Python object has no numeric value to fall back on.
     pub fn as_f32(&self) -> Result<Vec<f32>> {
         if self.header.dtype == DType::Object {
             return Err(NpyError::ObjectArray);
@@ -236,8 +241,30 @@ impl NpyArray {
                     i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
                 })
                 .collect(),
+            DType::I16 => self
+                .data
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+                .collect(),
+            DType::U16 => self
+                .data
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]) as f32)
+                .collect(),
+            DType::U32 => self
+                .data
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+                .collect(),
+            DType::U64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| {
+                    u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
+                .collect(),
             DType::U8 => self.data.iter().map(|b| *b as f32).collect(),
-            other => return Err(NpyError::UnsupportedDtype(format!("{:?} as f32", other))),
+            DType::Object => return Err(NpyError::ObjectArray),
         };
         Ok(out)
     }
@@ -562,6 +589,35 @@ mod tests {
             dir.display()
         );
         dir
+    }
+
+    /// Minimal in-memory `.npy` container, used where madmom has no stored fixture.
+    fn npy_bytes(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
+        let mut header =
+            format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
+        let padding = 64 - ((10 + header.len() + 1) % 64);
+        header.push_str(&" ".repeat(if padding == 64 { 0 } else { padding }));
+        header.push('\n');
+        let mut out = b"\x93NUMPY\x01\x00".to_vec();
+        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    #[test]
+    fn converts_integer_arrays_to_f32() {
+        // int16 is how the reference dumps audio (`sample.signal.npy`, `frames.npy`);
+        // without this conversion every framing comparison would be refused.
+        let samples: [i16; 4] = [-32768, -1, 0, 32767];
+        let mut data = Vec::new();
+        for value in samples {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let bytes = npy_bytes("<i2", "(4,)", &data);
+        let array = parse_npy(&bytes).unwrap();
+        assert_eq!(array.dtype(), DType::I16);
+        assert_eq!(array.as_f32().unwrap(), vec![-32768.0, -1.0, 0.0, 32767.0]);
     }
 
     #[test]

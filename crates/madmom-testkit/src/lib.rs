@@ -42,6 +42,59 @@ pub fn fixture(relative: &str) -> PathBuf {
     fixtures_dir().join(relative)
 }
 
+/// Directory holding the reference stage dumps (`tests/golden/`).
+///
+/// Overridable with `MADMOM_GOLDEN`. The dumps are derived data and stay out of the
+/// repository, see `tests/golden/README.md` for the two commands that regenerate them.
+pub fn golden_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MADMOM_GOLDEN") {
+        return PathBuf::from(dir);
+    }
+    // workspace root, i.e. the parent of the `crates` directory
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .map(|root| root.join("tests").join("golden"))
+        .unwrap_or_else(|| PathBuf::from("tests/golden"))
+}
+
+/// Path of one dump inside the golden directory.
+pub fn golden(relative: &str) -> PathBuf {
+    golden_dir().join(relative)
+}
+
+/// Load one golden dump, or report that it has to be generated first.
+///
+/// Returns `None` when the dump is missing and `MADMOM_REQUIRE_GOLDEN` is unset, so
+/// that a fresh checkout still runs the rest of the suite. With
+/// `MADMOM_REQUIRE_GOLDEN=1` a missing dump panics — that is what CI should do, so a
+/// silent skip can never be mistaken for a pass.
+pub fn load_golden(relative: &str) -> Option<ArrayD<f32>> {
+    let path = golden(relative);
+    match npy::read_npy(&path) {
+        Ok(array) => {
+            let shape: Vec<usize> = array.header.shape.clone();
+            let values = array
+                .as_f32()
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            Some(
+                ArrayD::from_shape_vec(IxDyn(&shape), values)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+            )
+        }
+        Err(NpyError::Io { .. }) => {
+            assert!(
+                std::env::var("MADMOM_REQUIRE_GOLDEN").is_err(),
+                "{} is missing: generate the reference dumps with tools/build_reference.sh \
+                 and tools/dump_reference.py (see tests/golden/README.md)",
+                path.display()
+            );
+            None
+        }
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
+}
+
 /// Loads an `activations` member of a fixture `.npz` together with its `fps`.
 ///
 /// A missing or object-typed `fps` member yields `None`, exactly like madmom's
