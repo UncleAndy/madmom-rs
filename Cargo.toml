@@ -15,6 +15,12 @@ members = [
     "crates/madmom-testkit",
     "crates/madmom-cli",
 ]
+# A path dependency inside the workspace directory is an implicit member, which would
+# make every --workspace build compile the Triton bindings with their own default
+# features (the GPU ones: bindgen, cuda-driver-sys) and fail clippy on their build
+# script. They arrive only through the triton-live feature of madmom-ml, so keep them
+# out of the workspace.
+exclude = ["third_party/tritonserver-rs"]
 
 [workspace.package]
 version = "0.1.0"

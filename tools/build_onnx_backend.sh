@@ -70,6 +70,16 @@ cmake -S "${backend}" -B "${build}" \
 echo "==> building"
 cmake --build "${build}" --parallel "$(nproc)"
 cmake --install "${build}"
+# The backend hardcodes INSTALL_RPATH to `${ORIGIN}` (its CMakeLists, lines 269 and 280),
+# so it looks for the ONNX Runtime it dlopens at model load time next to itself. Linking
+# alone is not enough, and overriding CMAKE_INSTALL_RPATH does nothing. Put the libraries
+# where `$ORIGIN` points instead of making every caller set LD_LIBRARY_PATH.
+for _lib in "${ort_dir}"/lib/libonnxruntime.so*; do
+  [ -e "${_lib}" ] || continue
+  ln -sfn "${_lib}" "${prefix}/backends/onnxruntime/$(basename "${_lib}")"
+  echo "==> linked $(basename "${_lib}") next to the backend"
+done
+unset _lib
 [ -f "${prefix}/backends/onnxruntime/libtriton_onnxruntime.so" ] || {
   echo "error: libtriton_onnxruntime.so not produced" >&2; exit 1; }
 echo "==> done: ${prefix}/backends/onnxruntime/libtriton_onnxruntime.so"

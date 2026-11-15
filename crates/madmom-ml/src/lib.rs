@@ -7,3 +7,10 @@
 pub mod inference;
 
 pub mod hmm;
+
+/// In-process Triton Inference Server (feature `triton-live`).
+#[cfg(feature = "triton-live")]
+pub mod triton;
+
+#[cfg(feature = "triton-live")]
+pub use triton::{TritonConfig, TritonModel};

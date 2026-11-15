@@ -52,6 +52,25 @@ pub enum InferenceError {
     /// The in-process Triton bindings were not compiled in.
     #[error("the triton-live feature is required for in-process inference")]
     TritonFeatureDisabled,
+    /// The in-process Triton server failed.
+    #[error("triton inference for {model} failed: {cause}")]
+    Triton {
+        /// Model the request was made for.
+        model: String,
+        /// What the bindings reported.
+        cause: String,
+    },
+}
+
+impl InferenceError {
+    /// Wraps a failure reported by the Triton bindings.
+    #[cfg(feature = "triton-live")]
+    pub(crate) fn triton<E: std::fmt::Display>(model: &str, cause: E) -> Self {
+        Self::Triton {
+            model: model.to_owned(),
+            cause: cause.to_string(),
+        }
+    }
 }
 
 /// Shape of the feature matrix a model consumes.

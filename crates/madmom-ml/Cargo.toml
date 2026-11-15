@@ -14,9 +14,13 @@ ndarray.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+tritonserver-rs = { path = "../../third_party/tritonserver-rs", default-features = false, optional = true }
+# the bindings capture a tokio runtime handle when they start the server, so the
+# synchronous facade has to own a runtime for the lifetime of the model
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [features]
 # triton-live pulls the in-process Triton bindings. Requires
 # libtritonserver.so and backends built by tools/build_triton_core.sh
 # and tools/build_onnx_backend.sh; keep it off for golden-mode work.
-triton-live = []  # task 2.3 maps this to ["dep:tritonserver-rs"]
+triton-live = ["dep:tritonserver-rs", "dep:tokio"]
