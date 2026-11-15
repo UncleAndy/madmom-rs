@@ -1024,8 +1024,8 @@ Test `…/tests/filters.rs` (порт `tests/test_audio_filters.py`, 97 тест
 bark2hz/bark_frequencies/bark_double_frequencies/log_frequencies/
 semitone_frequencies/hz2midi/midi2hz/hz2erb/erb2hz/frequencies2bins/bins2frequencies`.
 
-- [ ] Шаг 1 (тест): все скалярные преобразования частот (doctest-числа).
-- [ ] Шаг 2 (тест): матрицы `MelFilterbank(40 bands, 20..17000)`,
+- [x] Шаг 1 (тест): все скалярные преобразования частот (doctest-числа).
+- [x] Шаг 2 (тест): матрицы `MelFilterbank(40 bands, 20..17000)`,
       `LogarithmicFilterbank(12/octave, num_bands=6/12/24, 30..17000, norm=True)`;
       `frequencies2bins(unique=True)` — «ближайший бин» с округлением
       (`indices -= freqs - left < right - freqs`).
@@ -1033,6 +1033,29 @@ semitone_frequencies/hz2midi/midi2hz/hz2erb/erb2hz/frequencies2bins/bins2frequen
       последней в задаче, допускается отдельный коммит и `#[cfg]`-флаг, если
       эллиптический фильтр ещё не готов (тест не удалять).
 - [ ] Шаг 4: коммит `feat(audio): filterbanks`.
+
+**Статус: сделана первая часть (2026-11-15).** `crates/madmom-audio/src/filters.rs`:
+преобразования частот (`hz2mel`/`mel2hz`, `mel_frequencies`, `hz2midi`/`midi2hz`, `hz2erb`/
+`erb2hz`, `log_frequencies`, `semitone_frequencies`, таблицы Bark), `frequencies2bins` /
+`bins2frequencies`, `Filter`/`triangular_filter`/`rectangular_filter`, `triangular_band_bins`/
+`rectangular_band_bins`, `Filterbank` (+`from_filters`,`apply`), `mel_filterbank`,
+`logarithmic_filterbank`, `bark_filterbank` (нормальный/двойной шаг).
+
+Проверено против 20 дампов madmom (`tools/dump_filters.py` → `tests/golden/filters/`):
+**max |Δ| = 1.490e-08** при границе 1e-6 — расхождение только в порядке суммирования
+float32 при нормировке (NumPy суммирует попарно). Плюс 8 unit-тестов.
+
+Три отличия Bark-фильтрбанка, которые нашлись при сверке (и подтверждены дампом):
+он строится из **прямоугольных** неперекрывающихся фильтров (а не треугольных), флаг
+`unique_filters` у него **инвертирован** (`unique_bins = not unique_filters`), а таблица
+двойного шага начинается `20, 50, 100…` — в моей первой версии было `60`, и это поймал
+дамп, а не глаз. Кроме того `hz2bark`/`bark2hz` в эталоне **падают** с `NotImplementedError`
+(«produces negative values») — в порте они тоже возвращают ошибку, а не выдуманные числа.
+
+**Осталось по задаче:** `SemitoneBandpassFilterbank` (нужны `scipy.signal.ellip` +
+`filtfilt`), хрома-фильтрбанки (`SimpleChromaFilterbank`, `PitchClassProfileFilterbank`,
+`HarmonicFilterbank`, `HarmonicPitchClassProfileFilterbank`) и `RectangularFilterbank`.
+Это отдельный шаг: хрома нужна Фазе 5, полосовые фильтры — нотным/хрома-цепочкам.
 
 #### Task 1.5: `spectrogram` (Spectrogram/Filtered/Log/Diff/MultiBand)
 
