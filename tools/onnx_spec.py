@@ -270,7 +270,7 @@ FEATURE_WIDTHS: dict[str, int] = {
     "notes_brnn": 88,
     "notes_cnn": 3,
     "key_cnn": 3,
-    "chords_cnnfeat": 3,
+    "chords_cnnfeat": 113,  # frequency bins the CNN sees; from CNNChordFeatureProcessor
 }
 
 
@@ -541,6 +541,11 @@ def build_model(model: Any, spec: ModelSpec) -> Any:
         # express madmom's peephole connections, onnxruntime does not implement its P input.
         import onnx_recurrent
         return onnx_recurrent.build(model, spec)
+    if family == "cnn":
+        # Convolutions with flipped kernels in NCHW (tools/onnx_conv.py); madmom convolves,
+        # ONNX correlates, and the difference is invisible until the numbers are compared.
+        import onnx_conv
+        return onnx_conv.build(model, spec)
     if family in BUILDERS:
         layers = [node for node in getattr(model, "layers", []) if isinstance(node, _Stub)]
         return BUILDERS[family](layers, spec.input_dims[-1], spec)
