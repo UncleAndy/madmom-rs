@@ -27,14 +27,17 @@ against madmom's *algorithm*, not against these stale fixtures.
 Nothing here is patched or worked around — the baseline exists so that our own
 regressions stay recognisable.
 
-## Excluded from this run: tests/test_bin.py
+## Excluded from this run: tests/test_bin.py (105 tests, unrunnable here)
 
-Those tests import madmom's bin/* programs in-process and run them with `batch -j 1`,
-which starts a multiprocessing pool. Inside the sandbox (bubblewrap with an isolated
-IPC namespace) the workers block on a semaphore forever — the first full run hung at
-26 % and was stopped; pytest-timeout later pinned it to
-`multiprocessing/synchronize.py: wait` via tests/test_bin.py::run_batch. On a normal
-host these tests should run, so `./tools/build_reference.sh` includes them.
+Those tests import madmom's bin/* programs in-process and run them with `bash`-level
+`batch -j 1`, which starts a multiprocessing pool. In this sandbox (bubblewrap with an
+isolated IPC namespace) the workers block on a semaphore, and the block cannot even be
+interrupted: running the file on its own with `--timeout=20 --timeout-method=thread`
+produced the pytest-timeout banner twice in 420 s
+(`multiprocessing/synchronize.py: wait`) and was then stopped by an outer `timeout(1)`.
+So the whole file — not one unlucky test — is unrunnable in a sandbox; the first full
+suite run hung at 26 % for the same reason. `./tools/build_reference.sh` includes these
+tests and is meant to be run on a normal host, where the pool works.
 
 ## Raw log
 
