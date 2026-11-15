@@ -4,4 +4,6 @@
 
 #![deny(missing_docs)]
 
+pub mod ndimage;
 pub mod scipy;
+pub mod utils;

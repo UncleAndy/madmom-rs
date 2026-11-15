@@ -1355,17 +1355,40 @@ Test `…/tests/beats_hmm.rs` (порт `tests/test_features_beats_hmm.py`, 17 �
 `OnsetPeakPickingProcessor`, 11 ODF-функций);
 Test `…/tests/onsets.rs` (порт `tests/test_features_onsets.py`, 31 тест).
 
-- [ ] Шаг 1 (тест): ODF-числа из тестов madmom: `high_frequency_content`,
-      `spectral_diff`, `spectral_flux`, `superflux`, `complex_flux`,
-      `modified_kullback_leibler`, `phase_deviation`, `weighted_phase_deviation`,
-      `normalized_weighted_phase_deviation`, `complex_domain`,
-      `rectified_complex_domain` (первые 6 значений на `sample_log_filt_spec`).
-- [ ] Шаг 2 (тест): `peak_picking` с `pre_avg/post_avg/pre_max/post_max`
-      (скользящие mean/max с `origin`), `threshold`, `smooth`.
-- [ ] Шаг 3 (тест): `OnsetPeakPickingProcessor` offline (`combine=0.03`,
-      `delay`, `fps=100`) и online (буфер, без будущей информации); проверка
-      `process_forward == process_online`.
-- [ ] Шаг 4: коммит `feat(features): onset detection functions and peak picking`.
+**Статус (2026-11-15): ODF и пик-пикинг сделаны и сверены.** Файлы:
+`crates/madmom-features/src/onsets.rs`, `crates/madmom-core/src/{ndimage,utils,scipy}.rs`
+(фильтры scipy.ndimage, `combine_events`, `argrel*`), `crates/madmom-audio/src/stft.rs`
+(`local_group_delay` + `np.unwrap`), `crates/madmom-audio/src/spectrogram.rs`
+(`diff_max_bins` — раньше отказывал, теперь реализован через maximum_filter).
+
+- [x] Шаг 1 (тест): 11 ODF-функций — сделано, сверено с 11 дампами (макс. 4.3e-06, у
+      комплексно-доменных 1.2e-04: эталон считает `exp(1j*phase)` в complex64).
+- [x] Шаг 2 (тест): `peak_picking` — сделано; кадры пиков совпадают **точно** на всех
+      четырёх кейсах (в т.ч. скользящие mean/max с `origin` и `mode='constant'`).
+- [x] Шаг 3 (тест): `OnsetPeakPickingProcessor` offline и online — сделано; все onset'ы
+      совпадают точно, `process_online` (всё сразу и покадрово) = offline.
+- [x] Шаг 4: коммит `feat(features): onset detection functions and peak picking`.
+
+**Сверка (21 дамп, `tools/dump_onsets.py` → `tests/golden/onsets/`):**
+
+```
+вход:  spec 7.629e-06 (1 ulp f32), log_filt_spec 1.341e-07, phase 1.192e-07 (завёрнутая)
+ODF:   hfc 4.6e-07, spectral_diff 5.2e-07, spectral_flux 2.0e-06, superflux 1.6e-06,
+       complex_flux 4.3e-06, mkl 1.3e-07, phase_deviation 1.0e-07, wpd 1.6e-07,
+       normalized_wpd 1.7e-07, complex_domain 1.2e-04, rectified 1.0e-04
+пики:  35/40/16/24 кадров — совпадение точное
+onset'ы: offline 16, online 16 (всё сразу) и 16 (покадрово) — разница 0.000e0
+```
+
+Ловушки, вскрытые дампами: `phase_deviation` и `complex_flux` **не** должны требовать
+совпадения формы фазы со спектрограммой (эталон берёт фазу из неотфильтрованного STFT),
+а фазово-взвешенные ODF, наоборот, обязаны отказывать на отфильтрованной; у
+`_complex_domain` цель первого кадра — голая магнитуда (без своей фазы).
+
+**Не сделано:** ODF-процессоры, оборачивающие сеть (`SpectralOnsetProcessor`,
+`RNNOnsetProcessor`, `CNNOnsetProcessor`, `MultiOnsetProcessor`) — они относятся к фазе
+инференса; `correlation_diff` (эталон сам называет её «only for completeness», в тестах
+не используется).
 
 #### Task 3.4: DBN- и CRF-трекеры биений
 

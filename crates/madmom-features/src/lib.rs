@@ -7,4 +7,5 @@
 pub mod beats;
 pub mod beats_hmm;
 pub mod downbeats;
+pub mod onsets;
 pub mod tempo;

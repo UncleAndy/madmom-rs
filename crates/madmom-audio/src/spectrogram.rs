@@ -22,6 +22,8 @@
 //! `maximum_filter` semantics, and the multi-band / semitone-bandpass variants.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+
+use madmom_core::ndimage::{maximum_filter_2d, Mode};
 use num_complex::Complex32;
 use thiserror::Error;
 
@@ -343,11 +345,6 @@ impl Spectrogram {
     /// `+inf` is prepended, differenced, and every infinity is then set to zero.
     /// With `stack_diffs` the underlying spectrogram is stacked to the differences.
     pub fn difference(&self, parameters: &DifferenceParameters) -> Result<Self, SpectrogramError> {
-        if parameters.diff_max_bins.unwrap_or(1) > 1 {
-            return Err(SpectrogramError::NotImplemented(
-                "diff_max_bins > 1 needs scipy's maximum_filter semantics (plan task 1.6)",
-            ));
-        }
         let frames = match parameters.diff_frames {
             Some(frames) => frames,
             None => diff_frames(
@@ -365,10 +362,31 @@ impl Spectrogram {
                 .index_axis_mut(ndarray::Axis(0), row + frames)
                 .assign(&self.data.index_axis(ndarray::Axis(0), row));
         }
+        // the maximum filter (SuperFlux's vibrato suppression) is applied to the
+        // spectrogram *before* the padding: the padded rows hold +inf, and filtering those
+        // would turn the whole top of the difference into -inf, i.e. zero
+        let subtracted = match parameters.diff_max_bins {
+            Some(max_bins) if max_bins > 1 => {
+                let filtered = maximum_filter_2d(
+                    self.data.mapv(|value| value as f64).view(),
+                    (1, max_bins),
+                    (0, 0),
+                    Mode::Reflect,
+                );
+                let mut source = Array2::<f32>::from_elem((rows + frames, bins), f32::INFINITY);
+                for row in 0..rows {
+                    for bin in 0..bins {
+                        source[[row + frames, bin]] = filtered[[row, bin]] as f32;
+                    }
+                }
+                source
+            }
+            _ => padded.clone(),
+        };
         let mut diff = Array2::<f32>::zeros((rows, bins));
         for row in 0..rows {
             for bin in 0..bins {
-                diff[[row, bin]] = padded[[row + frames, bin]] - padded[[row, bin]];
+                diff[[row, bin]] = padded[[row + frames, bin]] - subtracted[[row, bin]];
             }
         }
         if parameters.positive_diffs {
@@ -622,15 +640,32 @@ mod tests {
     }
 
     #[test]
-    fn diff_max_bins_is_refused_instead_of_ignored() {
-        let spectrogram = Spectrogram::from_values(array![[1.0f32], [2.0]], None);
+    fn diff_max_bins_suppresses_a_vibrato_shift() {
+        // the SuperFlux trick: a peak that only moved by one bin between the frames must
+        // not produce a difference. Frame 1 has its peak at bin 2, frame 2 at bin 3, both
+        // of magnitude 5.
+        let spectrogram = Spectrogram::from_values(
+            array![[0.0f32, 0.0, 5.0, 0.0, 0.0], [0.0, 0.0, 0.0, 5.0, 0.0]],
+            None,
+        );
         let parameters = DifferenceParameters {
+            diff_frames: Some(1),
             diff_max_bins: Some(3),
+            positive_diffs: true,
             ..Default::default()
         };
-        assert!(matches!(
-            spectrogram.difference(&parameters),
-            Err(SpectrogramError::NotImplemented(_))
-        ));
+        let diff = spectrogram.difference(&parameters).unwrap();
+        assert_eq!(
+            diff.data().row(1).to_vec(),
+            vec![0.0, 0.0, 0.0, 0.0, 0.0],
+            "the maximum filter must absorb the one-bin shift"
+        );
+        // without the maximum filter the same input produces a positive difference
+        let plain = DifferenceParameters {
+            diff_max_bins: None,
+            ..parameters
+        };
+        let diff = spectrogram.difference(&plain).unwrap();
+        assert_eq!(diff.data().row(1).to_vec(), vec![0.0, 0.0, 0.0, 5.0, 0.0]);
     }
 }

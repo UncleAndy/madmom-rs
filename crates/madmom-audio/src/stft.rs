@@ -225,6 +225,65 @@ pub fn phase(transform: ArrayView2<'_, StftValue>) -> Array2<f64> {
     transform.mapv(|value| (value.im as f64).atan2(value.re as f64))
 }
 
+/// `np.unwrap` along the last axis of a 2-D array, as scipy's phase unwrapping does it.
+///
+/// The correction per step is `mod(dd + pi, 2*pi) - pi`, with two exceptions copied from
+/// numpy: a correction of exactly `-pi` becomes `+pi` when the step itself is positive, and
+/// steps smaller than `pi` in absolute value are left alone. Without those two the
+/// unwrapped phase of a few frames drifts by a full turn and the local group delay of the
+/// affected bins is wrong by `2*pi`.
+pub fn unwrap_rows(phase: ArrayView2<'_, f64>) -> Array2<f64> {
+    let (rows, columns) = (phase.shape()[0], phase.shape()[1]);
+    let mut out = phase.to_owned();
+    if columns < 2 {
+        return out;
+    }
+    for row in 0..rows {
+        let mut corrections = vec![0.0f64; columns - 1];
+        for column in 0..columns - 1 {
+            let step = phase[[row, column + 1]] - phase[[row, column]];
+            let mut wrapped = (step + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
+                - std::f64::consts::PI;
+            if wrapped == -std::f64::consts::PI && step > 0.0 {
+                wrapped = std::f64::consts::PI;
+            }
+            let mut correction = wrapped - step;
+            if step.abs() < std::f64::consts::PI {
+                correction = 0.0;
+            }
+            corrections[column] = correction;
+        }
+        let mut accumulated = 0.0;
+        for (column, correction) in corrections.iter().enumerate() {
+            accumulated += *correction;
+            out[[row, column + 1]] += accumulated;
+        }
+    }
+    out
+}
+
+/// Local group delay of the phase (`madmom/audio/stft.py::local_group_delay`).
+///
+/// The unwrapped phase is differenced **along the bins in reverse** and the last bin is
+/// zeroed: `lgd[:, k] = unwrapped[:, k] - unwrapped[:, k+1]`. The reference warns that the
+/// STFT must use `circular_shift=True` for this to be meaningful, which is what the
+/// spectrogram chains feeding the complex-flux ODF do.
+pub fn local_group_delay(phase: ArrayView2<'_, f64>) -> Array2<f64> {
+    let unwrapped = unwrap_rows(phase);
+    let (rows, columns) = (unwrapped.shape()[0], unwrapped.shape()[1]);
+    let mut out = unwrapped;
+    if columns == 0 {
+        return out;
+    }
+    for row in 0..rows {
+        for column in 0..columns - 1 {
+            out[[row, column]] -= out[[row, column + 1]];
+        }
+        out[[row, columns - 1]] = 0.0;
+    }
+    out
+}
+
 /// Short-time Fourier transform of a framed signal, with the window scaled the way
 /// the reference scales it.
 #[derive(Debug, Clone)]

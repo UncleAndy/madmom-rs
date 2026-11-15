@@ -506,7 +506,9 @@ impl Filterbank {
     }
 
     /// Lowest and highest non-zero bin of one band.
-    fn band_extent(&self, band: usize) -> (usize, usize) {
+    /// Lowest and highest non-zero bin of a band (madmom indexes `np.nonzero` of the
+    /// filterbank column for this).
+    pub fn band_extent(&self, band: usize) -> (usize, usize) {
         let column = self.data.column(band);
         let first = column
             .iter()

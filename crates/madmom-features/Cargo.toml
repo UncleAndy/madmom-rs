@@ -12,6 +12,7 @@ madmom-core = { path = "../madmom-core" }
 madmom-audio = { path = "../madmom-audio" }
 madmom-ml = { path = "../madmom-ml" }
 ndarray.workspace = true
+num-complex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

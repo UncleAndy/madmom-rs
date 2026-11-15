@@ -49,6 +49,7 @@ dependencies = [
 name = "madmom-core"
 version = "0.1.0"
 dependencies = [
+ "ndarray",
  "thiserror",
 ]
 
@@ -62,6 +63,7 @@ dependencies = [
  "madmom-ml",
  "madmom-testkit",
  "ndarray",
+ "num-complex",
  "thiserror",
 ]
 

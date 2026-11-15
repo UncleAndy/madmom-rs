@@ -187,6 +187,40 @@ quadratic B-spline interpolation (`interp1d(..., 'quadratic')`). Its dumps
 (`detect_tempo_hist_interp.npy`, `tempi_comb_interp.npy`) are in place, so the gap is
 measurable when that lands.
 
+## Onset detection and peak picking (`onsets/`)
+
+Produced by `tools/dump_onsets.py`, in two independent groups:
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_onsets.py third_party/madmom"
+```
+
+* the eleven onset detection functions, evaluated on the chain the reference's own onset
+  tests build — `Spectrogram(sample.wav, circular_shift=True)` and its logarithmic filtered
+  version (24 bands per octave, which is 140 bands over the audible range, `mul=1`,
+  `add=1`) — together with that spectrogram, the filtered one and the phase, so the input is
+  checked before the ODFs are. The phase-weighted ODFs (`weighted_phase_deviation`,
+  `normalized_weighted_phase_deviation`, `complex_domain`, `rectified_complex_domain`) are
+  dumped from the **unfiltered** spectrogram, because the reference raises on a filtered
+  one (its phase has the unfiltered bin count);
+* `peak_picking` and `OnsetPeakPickingProcessor` on madmom's activation fixtures
+  (`sample.super_flux.npz` at 200 fps, `sample.onsets_rnn.npz` at 100 fps), including the
+  online mode both all-at-once and frame by frame.
+
+`crates/madmom-features/tests/onsets_golden.rs` requires agreement within the plan's bounds.
+The largest differences are 4.6e-07 (`hfc`), 2.0e-06 (`spectral_flux`), 4.3e-06
+(`complex_flux`) and 1.2e-04 for the complex-domain ODFs — the last one because madmom
+computes `exp(1j * phase)` in complex64 while the port does it in float64, on values around
+500. The peak frames and every onset (offline, online all-at-once and online frame by frame)
+match **exactly**.
+
+The dumps caught two shape assumptions: `phase_deviation` and `complex_flux` must *not*
+require the phase to have the spectrogram's shape (the reference reaches the phase through
+the unfiltered transform), while the phase-weighted ODFs must. They also pinned a detail of
+`_complex_domain`: the first frame's target is the bare magnitude, not the magnitude with
+its own phase.
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):
