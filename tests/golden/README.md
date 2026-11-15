@@ -26,6 +26,9 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
 
 ## Content (`sample.wav`, 44.1 kHz mono, 123 481 samples ≈ 2.8 s)
 
+DSP stages of a **single-resolution chain** (`--frame-size 2048 --num-bands 6`), i.e. one
+band bank — that is what the individual Rust processors are pinned against:
+
 | file | dtype | shape | stage |
 | --- | --- | --- | --- |
 | `sample.signal.npy` | int16 | (123481,) | `SignalProcessor(num_channels=1)` |
@@ -35,12 +38,27 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
 | `sample.filt.npy` | float32 | (281, 45) | filtered spectrogram, 45 bands |
 | `sample.logspec.npy` | float32 | (281, 45) | log filtered spectrogram |
 | `sample.diff.npy` | float32 | (281, 90) | positive/negative first differences (45 + 45) |
-| `sample.features.npy` | float32 | (25290,) | flattened NN input: 281 frames x 90 features |
 
-The activation/path/beat stages are not dumped here: they belong to the mm
-pipeline and are covered by madmom's own `.npz` fixtures
-(`third_party/madmom/tests/data/activations/*.npz`), which the Rust tests read
-directly — see plan §3.3.
+The last four entries come from the **public processor**, not from that single-resolution
+chain, because the networks are fed a wider vector than one band bank produces:
+
+| file | dtype | shape | stage |
+| --- | --- | --- | --- |
+| `sample.features.npy` | float32 | (281, 266) | what the `BEATS_BLSTM` networks receive (three resolutions) |
+| `sample.activations.npy` | float32 | (281,) | ensemble output of `BEATS_BLSTM` |
+| `sample.path.npy` | int | (281,) | `DBNBeatTrackingProcessor.hmm.viterbi` state path |
+| `sample.beats.npy` | float32 | (8,) | beat positions in seconds |
+
+`dump_preproc.py --group beats_lstm` shows the other width: the online chain feeds its
+networks **162** features per frame (12 bands, `log10`, `SpectrogramDifferenceProcessor`).
+
+## Cross-checked against madmom's own fixtures
+
+`sample.activations.npy` versus `third_party/madmom/tests/data/activations/sample.beats_blstm.npz`:
+max |Δ| = 8.9e-08, mean 1.1e-08 — agreement at float32 rounding level (the fixture was produced
+by a different madmom run, so bit-equality is not expected; the plan's tolerance for network
+activations is 1e-4). `sample.features.npy` is additionally identical to the input dumped
+independently by `dump_preproc.py --preproc` (two code paths, same numbers).
 
 ## Verified framing rule
 

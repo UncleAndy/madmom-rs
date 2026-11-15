@@ -68,8 +68,6 @@ def build_stages(args):
                                          SpectrogramDifferenceProcessor)
     from madmom.audio.stft import ShortTimeFourierTransformProcessor
     from madmom.features.beats import DBNBeatTrackingProcessor
-    from madmom.ml.nn import NeuralNetworkEnsemble
-    from madmom.models import BEATS_BLSTM
 
     sig = SignalProcessor(num_channels=1, sample_rate=args.sample_rate)
     frames = FramedSignalProcessor(frame_size=args.frame_size)
@@ -80,7 +78,6 @@ def build_stages(args):
     logspec = LogarithmicSpectrogramProcessor(mul=1, add=1)
     diff = SpectrogramDifferenceProcessor(diff_ratio=0.5, positive_diffs=True,
                                           stack_diffs=np.hstack)
-    ensemble = NeuralNetworkEnsemble.load(BEATS_BLSTM)
     dbn = DBNBeatTrackingProcessor(fps=args.fps, min_bpm=args.min_bpm,
                                    max_bpm=args.max_bpm)
 
@@ -92,10 +89,28 @@ def build_stages(args):
         ("filt", lambda prev: filt(prev)),
         ("logspec", lambda prev: logspec(prev)),
         ("diff", lambda prev: diff(prev)),
-        ("features", lambda prev: np.hstack(prev)),
-        ("activations", lambda prev: ensemble(prev)),
     ]
-    return stages, dbn
+
+    def nn_pair():
+        """Return (network input, activations) of the public processor chain.
+
+        The stage list above is a single-resolution chain (one band bank) — that
+        is what the individual DSP stages are pinned against — but it is *not*
+        what the networks receive: BEATS_BLSTM is fed 266 features per frame by a
+        three-resolution chain, BEATS_LSTM 162 by a 12-band one. The NN stages
+        therefore come from the public processor, exactly as tools/dump_preproc.py
+        walks it, so the dump cannot disagree with the reference.
+        """
+        import dump_preproc
+        data = args.audio          # the chain starts from the audio file
+        for stage in getattr(dump_preproc.groups()[args.group](), "processors", []):
+            if dump_preproc.is_network(stage):
+                features = np.ascontiguousarray(np.atleast_2d(data), dtype=np.float32)
+                return features, np.asarray(stage(features))
+            data = stage(data)
+        raise SystemExit("no network stage found for group %r" % args.group)
+
+    return stages, dbn, nn_pair
 
 
 def main() -> int:
@@ -110,6 +125,8 @@ def main() -> int:
                         help="stages to dump (default: all)")
     parser.add_argument("--frame-size", type=int, default=2048)
     parser.add_argument("--sample-rate", type=int, default=44100)
+    parser.add_argument("--group", default="beats_blstm",
+                        help="processor group whose network stages are dumped")
     parser.add_argument("--num-bands", type=int, default=6)
     parser.add_argument("--fmin", type=float, default=30.0)
     parser.add_argument("--fmax", type=float, default=17000.0)
@@ -129,21 +146,32 @@ def main() -> int:
 
     import_madmom()
     args.out.mkdir(parents=True, exist_ok=True)
-    stages, dbn = build_stages(args)
+    stages, dbn, nn_pair = build_stages(args)
 
     previous = None
-    values = {}
     for name, fn in stages:
         if name not in args.stages:
             continue
         previous = fn(previous) if previous is not None else fn(None)
-        values[name] = np.asarray(previous)
+        values = np.asarray(previous)
         path = args.out / f"{args.audio.stem}.{name}.npy"
-        np.save(path, values[name])
-        print(f"{name:12s} shape={values[name].shape} dtype={values[name].dtype} -> {path}")
+        np.save(path, values)
+        print(f"{name:12s} shape={values.shape} dtype={values.dtype} -> {path}")
+
+    activations = None
+    if {"features", "activations", "path", "beats"} & set(args.stages):
+        features, activations = nn_pair()
+        if "features" in args.stages:
+            path = args.out / f"{args.audio.stem}.features.npy"
+            np.save(path, features)
+            print(f"{'features':12s} shape={features.shape} dtype={features.dtype} -> {path}")
+        if "activations" in args.stages:
+            path = args.out / f"{args.audio.stem}.activations.npy"
+            np.save(path, np.asarray(activations))
+            print(f"{'activations':12s} shape={np.shape(activations)} dtype={np.asarray(activations).dtype} -> {path}")
 
     if "path" in args.stages or "beats" in args.stages:
-        activations = np.asarray(values["activations"]).flatten()
+        activations = np.asarray(activations).flatten()
         path, log_prob = dbn.hmm.viterbi(activations)
         if "path" in args.stages:
             np.save(args.out / f"{args.audio.stem}.path.npy", path)
