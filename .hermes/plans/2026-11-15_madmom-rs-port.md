@@ -371,6 +371,16 @@ third_party/madmom-models-onnx/          # отдельный репозитор
 - старая реализация `build_lstm` вдобавок паковала узлы неверно (`B` попадал в слот `P`,
   смещения гейтов обнулялись) — теперь она **отказывается** строить граф (`UnsupportedLayer`
   с причиной), вместо того чтобы выдать неправильную модель.
+
+**РЕШЕНИЕ (владелец, 2026-11-15): вариант B.** Рекуррентность LSTM/BLSTM строится
+примитивами (`Scan`/`Loop` с переносимым состоянием `(h, c)`, тело цикла —
+`MatMul`/`Add`/`Mul`/`Sigmoid`/`Tanh` + `Slice` по гейтам), порядок операций — точно как в
+`Gate.activate`/`LSTMLayer.activate` (пипхол **до** рекуррентного вклада; гейт `o` смотрит
+на **новое** `c_t`, гейты `i`/`f` — на `c_{t-1}`; `c_t = g⊙i + c_{t-1}⊙f`). Вариант C
+(LSTM в Rust) отклонён: архитектура «весь NN — через ONNX/Triton» сохраняется, у
+верификации остаётся одна точка — `tools/validate_onnx.py`. Проверять обязательно на
+полной последовательности (281 кадр): рекуррентность накапливает разницу порядков
+сложений float32.
 | `PadLayer`/`TransposeLayer`/`ReshapeLayer`/`AverageLayer` | `Pad`/`Transpose`/`Reshape`/`ReduceMean` | `keepdims`, порядок осей |
 | `MultiTaskLayer`/`SequentialLayer`/`ParallelLayer` | структура графа (разные входы/выходы) | выбор выхода (`itemgetter(0)`) остаётся в Rust |
 | `TCNBlock`/`TCNLayer` | `Conv` с `dilations`, нулевой `Pad` `2*dilation_rate`, `Add` (residual), `Concat` (skip) | дилатация у madmom сделана через `as_strided` — сверить с `Conv(dilations=…)` |
@@ -880,20 +890,46 @@ Test `crates/madmom-audio/tests/signal.rs` (порт `tests/test_audio_signal.py
   `remix()`, `rescale()`, `trim()`, `energy()`, `root_mean_square()`,
   `sound_pressure_level()`, `write_wave_file()`.
 
-- [ ] Шаг 1 (тест): `FramedSignal` на 9-сэмпловом сигнале: `num_frames` для
+- [x] Шаг 1 (тест): `FramedSignal` на 9-сэмпловом сигнале: `num_frames` для
       `end='normal'`/`'extend'`, `origin='online'`/`'offline'`/`'stream'`,
       `frame_rate`, `overlap_factor`, срез `[2:5]` даёт новый `FramedSignal`
       со сдвинутым origin.
-- [ ] Шаг 2 (тест): `signal_frame` на границах: `start<0`, `stop>len`,
+- [x] Шаг 2 (тест): `signal_frame` на границах: `start<0`, `stop>len`,
       `pad='repeat'` (повтор первого/последнего сэмпла) и `pad=0`.
-- [ ] Шаг 3 (реализация): `signal_frame` — точный перенос формулы
+- [x] Шаг 3 (реализация): `signal_frame` — точный перенос формулы
       `start = index*hop - frame_size/2 - origin`.
-- [ ] Шаг 4 (тест): `smooth` (kernel int → окно Хэмминга, `np.convolve 'same'`;
+- [x] Шаг 4 (тест): `smooth` (kernel int → окно Хэмминга, `np.convolve 'same'`;
       2-D → `convolve2d 'same'`), `normalize` (int16 → /32767), `remix`
       (моно=среднее, `channel=N` — выбор канала), `rescale`, `trim`, `energy`,
       `rms`, `spl`.
-- [ ] Шаг 5: перенести doctest-числа из `signal.py` (41 пример) как тесты.
-- [ ] Шаг 6: коммит `feat(audio): signal, framing and signal functions`.
+- [x] Шаг 5: вместо ручного переноса 41 doctest-примера — генератор
+      `tools/gen_audio_vectors.py`, который снимает числа у самого madmom и пишет
+      `crates/madmom-audio/tests/signal_vectors.rs` (9 тестов: smooth 1-D/2-D с чётным и
+      нечётным ядром, gain/attenuate/normalize/rescale, remix, trim, energy/RMS/SPL,
+      `signal_frame` с тремя origin, счёт кадров normal/extend). Примеры, требующие
+      загрузки файлов (`Signal(path)`, `resample`, `write`), закрываются в Task 1.2.
+- [x] Шаг 6: коммит `feat(audio): signal, framing and signal functions`.
+
+**Статус: выполнено (2026-11-15).** Реализовано в `crates/madmom-audio/src/signal.rs`
+(≈800 строк с документацией): константы, `DType` с правилами приведения, `Signal`,
+`signal_frame`, `FramedSignal`, `smooth`/`hamming`/`convolve_same`, `adjust_gain`,
+`attenuate`, `normalize`, `remix`, `rescale`, `trim`, `energy`, `root_mean_square`,
+`sound_pressure_level`, `Origin`, `EndOfSignal`.
+
+Проверено здесь (cargo 1.97, офлайн):
+
+```
+cargo test -p madmom-audio   → 7 unit + 1 golden + 9 векторов эталона, все зелёные
+cargo test -p madmom-io      → 7 (добавлен int16 → f32: без него дампы сигнала не читались)
+cargo clippy --workspace --all-targets -- -D warnings → чисто; cargo fmt --check → чисто
+```
+
+Ключевое: `tests/signal_golden.rs` сравнивает нарезку реального файла с дампом эталона
+**побитово** (`max_abs_diff == 0`, 281 × 2048, int16), а `signal_vectors.rs` — числа самого
+madmom для скалярных функций. По ходу всплыл дефект Phase 0: `npy.as_f32()` не умел
+целочисленные типы и отказывался читать `sample.signal.npy` — добавлены I16/U16/U32/U64
+с тестом.
+
 
 #### Task 1.2: `io::audio` (WAV + ffmpeg)
 
