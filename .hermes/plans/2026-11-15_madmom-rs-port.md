@@ -13,19 +13,20 @@
 + фасад `madmom-rs` + `madmom-cli`. Python-граф процессоров (`Processor`, работающий
 над `numpy.ndarray` и его подклассами) транслируется в типизированные Rust-структуры
 с данными в `ndarray`. NN-инференс в Rust **не портируется**: активации считает
-`tritonserver` (клиент — `tritonserver_rs`), Rust владеет пре-процессингом до входа
+`tritonserver` (клиент — `tritonserver-rs`), Rust владеет пре-процессингом до входа
 сети и всей постобработкой, а для локальной разработки и тестов Фаз 3–5 активации
 берутся из фикстур madmom (golden-режим). Верификация — на «золотых» данных самого
 madmom (`tests/data/activations/*.npz`, `tests/data/detections/*.txt`) и на
 промежуточных дампах, снятых с собранного эталона.
 
-**Tech Stack:** Rust (`ndarray`, `rustfft`/`realfft`, `tritonserver_rs`, `serde`/`serde_json`,
+**Tech Stack:** Rust (`ndarray`, `rustfft`/`realfft`, `tritonserver-rs`, `serde`/`serde_json`,
 `rayon`, `clap`, `hound`, `byteorder`, `flate2`/`zip` для `.npz`, `thiserror`);
 Python-инструменты (numpy, scipy, cython, pytest) через `nix-shell`;
 ffmpeg для декодирования не-WAV.
 
 **Spec:** `third_party/madmom/` (submodule CPJKU/madmom, версия `0.17.dev0`,
-HEAD `27f032e`), модели — `third_party/madmom_models/` (`master`), фикстуры и тесты —
+HEAD `27f032e`), модели — `third_party/madmom/madmom/models/` (вложенный сабмодуль,
+CPJKU/madmom_models@7e3dc1b), фикстуры и тесты —
 `third_party/madmom/tests/`.
 
 ## Global Constraints
@@ -111,7 +112,7 @@ Docstring-примеров (doctest, `>>>`) в библиотеке — **313**:
   `DeepChromaChordRecognitionProcessor`; `audio.chroma.DeepChromaProcessor`.
 - `features.key`: `CNNKeyRecognitionProcessor` (24 класса тональностей).
 
-### 1.3 Модели (`third_party/madmom_models`, 92 файла `.pkl`, ~35 МБ, ≈7.5 млн float-параметров)
+### 1.3 Модели (`third_party/madmom/madmom/models`, 92 файла `.pkl`, ~35 МБ, ≈7.5 млн float-параметров)
 
 > В порт они **не входят** (решение владельца): инференс — через Triton. Таблица ниже —
 > справка для того, кто будет собирать Triton-репозиторий (форматы, группы моделей,
@@ -135,7 +136,7 @@ Docstring-примеров (doctest, `>>>`) в библиотеке — **313**:
 | `key/2018` | 1 | 666 561 | CNN + `BatchNormLayer`/`MaxPoolLayer` |
 | `patterns/2013` | 2 | — | `madmom.ml.gmm.GMM` (full covariance, для `GMMPatternTracker`) |
 
-Полный список констант-реестра — `third_party/madmom_models/__init__.py`
+Полный список констант-реестра — `third_party/madmom/madmom/models/__init__.py`
 (`BEATS_LSTM`, `BEATS_BLSTM`, `BEATS_TCN`, `DOWNBEATS_BLSTM`, `DOWNBEATS_BGRU`,
 `ONSETS_RNN`, `ONSETS_BRNN`, `ONSETS_BRNN_PP`, `ONSETS_CNN`, `NOTES_BRNN`,
 `NOTES_CNN`, `NOTES_CNN_MIREX`, `CHROMA_DNN`, `CHORDS_DCCRF`, `CHORDS_CNN_FEAT`,
@@ -155,37 +156,62 @@ Docstring-примеров (doctest, `>>>`) в библиотеке — **313**:
 
 ## 2. Ключевые решения
 
-**D1. NN-инференс — удалённый (Triton), NN-слои в Rust не портируются.**
-Решение владельца: модели не конвертируем и не трогаем, запуск — на `tritonserver`
-через `tritonserver_rs`. Следствия:
+**D1. NN-слои в Rust не портируются: инференс — Triton in-process, модели — ONNX.**
+Решение владельца: модели переписываем не руками, а **переносим в ONNX**; запуск —
+`tritonserver-rs` 0.4.1 (локальный чек-аут `projects/RUST/tritonserver-rs`, MIT). Это
+bindings к C-API Triton: сервер поднимается **в том же процессе** и линкуется с
+`libtritonserver.so` — не сетевой клиент. Проверенные факты по крейту:
+- репозиторий моделей: `models/<name>/config.pbtxt` + `models/<name>/<version>/model.onnx`;
+- API (по исходникам `src/{options,server,request,response,memory}.rs`):
+  `Options::new(repo)` → `.backend_directory("/opt/tritonserver/backends")`,
+  `.model_control_mode(Control::Explicit)`, `.startup_model(name)`,
+  `.strict_model_config(true)`, `.exit_timeout(..)`,
+  `.pinned_memory_pool_byte_size(0)` для CPU-only; `Server::new(opts).await`
+  (async, tokio) → `server.create_request(model, version)` (`-1` = последняя) →
+  `request.add_default_allocator().add_input(name, Buffer)` → `request.infer_async()?.await?`
+  → `Response::{get_outputs, get_output, return_buffers}`;
+- фича `gpu` включена по умолчанию (вызывает `init_cuda()`); CPU-only =
+  `default-features = false` + `instance_group` `KIND_CPU` в `config.pbtxt`;
+- сборка/рантайм требуют `libtritonserver.so`, бинарников бэкендов (ONNX Runtime) и
+  `libclang` для bindgen; минимальная версия контейнера — 24.08 (C-API 1.34); см. R16.
+
+Следствия:
 - из объёма порта выпадает `madmom/ml/nn/*` (1454 строки слоёв + `activations.py` +
   Cython-компиляция `layers.py`) — вместе с самым неблагодарным участком (эмуляция
   `scipy.ndimage.convolve` с `_kernel_margins`, `maximum_filter`, TCN-дилатации через
   `as_strided`): риски R2/R3 по NN-части закрываются сами;
 - вся ответственность за точность переносится на **пре-процессинг** (Rust, Task 2.2)
-  и на конвертацию моделей в формат Triton (не наша зона, но контракт входа/выхода —
-  наша);
-- NN-стадии становятся сетевыми: пайплайны возвращают `Result`, появляется конфиг
-  (`madmom.toml` / `MADMOM_TRITON_URL`), online-режим получает бюджет задержки (R14);
+  и на ONNX-перенос моделей (делает владелец; контракт входа/выхода — наш);
+- NN-стадии остаются локальными, но появляется `Result` внутри синхронного API:
+  вызов асинхронный (`infer_async`), наружу — синхронный фасад на внутреннем
+  tokio-рантайме (`block_on`), чтобы не менять стиль API madmom; конфиг —
+  `madmom.toml` / `MADMOM_MODEL_REPO` (D10); online-режим получает бюджет задержки (R14);
 - локальные тесты Фаз 3–5 идут в **golden-режиме** (активации из фикстур madmom),
   поэтому Triton нужен только для Task 2.4.
 
-*Справка для того, кто будет строить Triton-репозиторий (проверено на этом чек-ауте,
-не является задачей порта):* все 92 `.pkl` — pickle протокола 2 (Python 2) с объектами
+*Справка для ONNX-переноса моделей (проверено на этом чек-ауте; сама конвертация —
+не задача порта):* все 92 `.pkl` — pickle протокола 2 (Python 2) с объектами
 `madmom.ml.nn.*`, `madmom.ml.gmm.GMM`, `madmom.processors.SequentialProcessor` и
-`numpy.ndarray` внутри; читаются на Python 3.13 + NumPy 2.4 (92/92), но требуют двух
-поправок: `notes/2018/notes_cnn_[12].pkl` ссылаются на исчезнувший в NumPy 2
-`numpy.lib.shape_base` (нужен модуль-шим), а переопределение `Unpickler.find_class`
-целиком ломает 11 файлов (TCN/notes CNN) — теряется py2→py3 мэппинг `c_codecs`→`codecs`
-(`Cannot interpret '<encode>' as a data type`); сначала `super().find_class()`,
-подмены только для `madmom.*`.
+`numpy.ndarray` внутри; читаются на Python 3.13 + NumPy 2.4 (92/92) с двумя поправками:
+`notes/2018/notes_cnn_[12].pkl` ссылаются на исчезнувший в NumPy 2 `numpy.lib.shape_base`
+(нужен модуль-шим), а переопределение `Unpickler.find_class` целиком ломает 11 файлов
+(TCN/notes CNN) — теряется py2→py3 мэппинг `c_codecs`→`codecs`
+(`Cannot interpret '<encode>' as a data type`); сначала `super().find_class()`, подмены
+только для `madmom.*`. Не-NN модели тоже уезжают в ONNX (решение 3): `chords_dccrf/cnncrf`
+— `ConditionalRandomField` с матрицами (`pi/tau/c/A/W`), `patterns/*ballroom_pattern_*.pkl`
+— `GMM` (`weights/means/covars`, full covariance); обёртка для CRF: вход — наблюдения,
+выход — последовательность состояний/меток; для GMM: вход — признаки кадра, выход —
+log-плотности по компонентам.
 
-**D2. Граница «локально/удалённо»: Rust владеет пре-процессингом, Triton — сетями.**
-Контракт: Rust отдаёт ровно тот тензор, который madmom подавал в первую сеть
-ансамбля (те же разрешения, порядок `hstack`/`dstack`, паддинги), и ожидает ровно тот
-тензор, который сеть возвращала. Усреднение ансамбля, `squeeze` и выбор выхода
-multi-task сети (`itemgetter(0)`) остаются в Rust. Вход сверяется с дампами эталона
+**D2. Граница: Rust владеет пре-процессингом и постобработкой, ONNX-модели — сетями.**
+Контракт: Rust отдаёт ровно тот тензор, который madmom подавал в первую сеть ансамбля
+(те же разрешения, порядок `hstack`/`dstack`, паддинги), и ожидает ровно тот тензор,
+который сеть возвращала. Усреднение ансамбля, `squeeze` и выбор выхода multi-task сети
+(`itemgetter(0)`) остаются в Rust. Вход сверяется с дампами эталона
 (`tests/golden/preproc/*.npy`), выход — с `.npz`-фикстурами.
+Туда же уезжают две не-NN модели (решение 3): CRF аккордов вызывается batch-ом на файл,
+GMM паттернов возвращает log-плотности по кадрам, которые подставляются в HMM как
+`ObservationSource`. Математика `madmom.ml.gmm`/`madmom.ml.crf` в Rust не портируется.
 
 **D3. Python-объекты-процессоры не портируются как механизм.**
 `Processor.load/dump`, `pickle_processor`, `bin/PickleProcessor`, `io_arguments`
@@ -253,11 +279,16 @@ onsets, `100` для DBN-битов (`FRAME_SIZE=2048, HOP_SIZE=441` → 100 fps
 фиксированном порядке), иначе паритет плавает. 8 сетей ансамбля уходят отдельными
 запросами к Triton (параллельно), но усреднение — строго в порядке madmom.
 
-**D10. Triton — внешняя конфигурация.** `madmom.toml` (`[triton] url`, имена и
-версии моделей) + переопределение через `MADMOM_TRITON_URL`; отсутствие адреса даёт
-понятную ошибку при выборе `ActivationSource::Triton`, а не при старте и не в
-golden-режиме. Лицензия моделей (CC BY-NC-SA 4.0, NonCommercial) — на стороне
-Triton-репозитория; в крейты не попадает ничего, кроме контракта.
+**D10. Triton — внешние конфиг и бинарники.** `madmom.toml`:
+`[triton] repository = "models"`, `backend_directory = "/opt/tritonserver/backends"`,
+`model_version = -1`, `control = "explicit"`, `cpu_only = true` (решение владельца:
+пока только CPU-only); переопределения —
+`MADMOM_MODEL_REPO` (по умолчанию `third_party/madmom-models-onnx/models`, см. §2.1),
+`MADMOM_TRITON_BACKENDS`. Сервер поднимается один раз на процесс,
+модели загружаются через `model_control_mode(EXPLICIT)` + `load_model`. Отсутствие
+репозитория или либы даёт понятную ошибку при выборе `ActivationSource::TritonLocal`,
+а не при старте и не в golden-режиме. Лицензия моделей (CC BY-NC-SA 4.0, NonCommercial) —
+на стороне ONNX-репозитория; в крейты не попадает ничего, кроме контракта.
 
 **D11. WAV-чтение — своё, всё остальное — ffmpeg.** Как в madmom:
 `load_wave_file` (только PCM, через `wave`) → используется, если не требуется
@@ -266,6 +297,85 @@ Triton-репозитория; в крейты не попадает ничег�
 `tests/test_io_audio.py` переносятся 1:1 (в т.ч. ошибка для `foo_bar.wav`).
 
 **D12. «Не портируем» по списку** — см. §7.
+
+### 2.1 Спецификация ONNX-репозитория (решение принято, п. 1 прошлого доклада)
+
+Раскладка (совместима с `config.pbtxt`-моделью Triton, см. D1):
+
+```
+third_party/madmom-models-onnx/          # отдельный репозиторий (позже — сабмодуль), CC BY-NC-SA
+└── models/
+    ├── beats_blstm_1/{config.pbtxt, 1/model.onnx}      # …_2 … _8 (2015)
+    ├── beats_lstm_1/…_8            # 2016 (online)
+    ├── beats_tcn_1/…_8             # 2019, два выхода
+    ├── downbeats_blstm_1/…_8, downbeats_bgru_rhythmic_0…5, downbeats_bgru_harmonic_0…5
+    ├── onsets_rnn_1/…_8, onsets_brnn_1/…_8, onsets_brnn_pp_1/…_8, onsets_cnn
+    ├── notes_brnn, notes_cnn_1, notes_cnn_2, notes_cnn
+    ├── chroma_dnn, key_cnn, key_cnn_1…4
+    ├── chords_cnnfeat, chords_cnncrf, chords_dccrf
+    └── ballroom_pattern_3_4, ballroom_pattern_4_4        # GMM
+```
+
+- имя каталога = stem исходного `.pkl` (источник — `third_party/madmom/madmom/models/`,
+  92 файла уже выкачаны); версия — `1`; файл — `model.onnx`.
+- **ансамбли — восемь отдельных моделей** (`beats_blstm_1…_8`), а не одна ансамблевая:
+  так сохраняется паритет с madmom (усреднение 8 сетей делаем мы, D9) и появляется
+  возможность сверить каждую сеть по отдельности с эталонным дампом.
+- **имена тензоров:** вход — `input` (f32); выход — `output` (f32). Исключения:
+  `beats_tcn_*` — `output_beats`, `output_tempo` (multi-task); GMM — вход `observation`,
+  выход `log_densities`; CRF — вход `observation`, выходы `emission`, `transition`,
+  `initial`, `final`.
+- `config.pbtxt` (шаблон; CPU-only — решение владельца):
+  ```textproto
+  name: "beats_blstm_1"
+  backend: "onnxruntime"
+  max_batch_size: 0                     # батчинг по кадрам делает Rust, не Triton
+  instance_group [{ kind: KIND_CPU }]
+  input  [{ name: "input"  data_type: TYPE_FP32 dims: [-1, 162] }]
+  output [{ name: "output" data_type: TYPE_FP32 dims: [-1, 1] }]
+  ```
+  (`-1` — переменное число кадров; для CNN/TCN вход 3-D: `dims: [-1, <freq>, <channels>]`.)
+- путь по умолчанию: `MADMOM_MODEL_REPO` → `third_party/madmom-models-onnx/models` →
+  `<repo>/models` (gitignored). Пока репозитория нет — Фазы 3–5 живут в golden-режиме.
+- **скрипт конвертации — наш**, `tools/convert_to_onnx.py` (исполняемая спецификация;
+  владелец может переиспользовать). Приёмка каждой модели — Task 2.5.
+
+**Отображение слоёв madmom → ONNX (что обязан сделать конвертер).** Ловушки, на которых
+расходится паритет, вынесены явно:
+
+| madmom (`ml/nn/layers.py`) | ONNX | ловушка |
+|---|---|---|
+| `FeedForwardLayer` | `MatMul` + `Add` (+ активация) | — |
+| `RecurrentLayer` | развёртка по кадрам или `Loop` | состояние `_prev`/`init` — начальное состояние в графе |
+| `LSTMLayer` (4× `Gate`/`Cell`, peephole) | `LSTM` (`P` = peephole, `W/R/B` — конкатенация 4 гейтов) | порядок гейтов в ONNX — **i, o, f, c**, у madmom — input/forget/cell/output: нужна перестановка строк |
+| `GRULayer` (`GRUCell`) | `GRU` (`linear_before_reset=1`) | madmom `out = ug*cell + (1-ug)*prev`, ONNX `H = (1-z)*h + z*H_prev` → гейт **инвертирован**; сверить по дампу |
+| `BidirectionalLayer` | два направления + `Concat` | порядок конкатенации fwd/bwd |
+| `ConvolutionalLayer` | `Pad` (constant) + `Conv` | обрезка полей по `_kernel_margins` (чётные ядра сдвигаются); madmom считает в (time, freq, chan), ONNX `Conv` — (N, C, H, W) → `Transpose` вокруг |
+| `MaxPoolLayer` | `MaxPool` + срезы `[size//2 : n-(size-1)//2 : stride]` | та же семантика срезов, `mode='constant'` |
+| `BatchNormLayer` | `Mul` + `Add` (инференс: `(x-mean)*(gamma*inv_std)+beta`) | — |
+| `PadLayer`/`TransposeLayer`/`ReshapeLayer`/`AverageLayer` | `Pad`/`Transpose`/`Reshape`/`ReduceMean` | `keepdims`, порядок осей |
+| `MultiTaskLayer`/`SequentialLayer`/`ParallelLayer` | структура графа (разные входы/выходы) | выбор выхода (`itemgetter(0)`) остаётся в Rust |
+| `TCNBlock`/`TCNLayer` | `Conv` с `dilations`, нулевой `Pad` `2*dilation_rate`, `Add` (residual), `Concat` (skip) | дилатация у madmom сделана через `as_strided` — сверить с `Conv(dilations=…)` |
+
+### 2.2 Контракт ONNX для CRF и GMM (решение принято, п. 2 прошлого доклада)
+
+- **GMM** (`ballroom_pattern_3_4.pkl`, `ballroom_pattern_4_4.pkl`): модель целиком
+  уезжает в ONNX. Вход `observation` f32 `[frames, num_features]`; выход
+  `log_densities` f32 `[frames, num_densities]`, где `num_densities = 2 блока × число
+  GMM` и порядок столбцов — ровно тот, который задаёт
+  `GMMPatternTrackingObservationModel.pointers` (Rust подставляет значения в HMM как
+  `ObservationSource`, ничего не считая). Формула внутри графа:
+  `log N(x | μ, Σ) + log w`, `covariance_type='full'`.
+- **CRF** (`chords_dccrf.pkl`, `chords_cnncrf.pkl`): модель (параметры + скоринг) —
+  в ONNX, но **не** динамическое программирование. Граф отдаёт
+  `emission` f32 `[frames, states]`, `transition` f32 `[states, states]`,
+  `initial` f32 `[states]`, `final` f32 `[states]`; Viterbi выполняет Rust
+  (`madmom_features::chords`, ~30 строк — перенос `ml/crf.py::process`, тест —
+  `tests/test_ml_crf.py`).
+  *Почему так:* последовательный Viterbi в графе требует `Loop`/`Scan` с carried-state
+  и ручного back-pointer тензора — хрупко и не проверяемо по частям; сам DP — это
+  обычный код, как Viterbi в `hmm.pyx`, который мы всё равно портируем. Это осознанное
+  уточнение решения 3: в ONNX уходит *модель*, а не общий алгоритм.
 
 ## 3. Целевое устройство
 
@@ -278,12 +388,12 @@ madmom-rs/
 ├── crates/
 │   ├── madmom-core/           # Processor/Online/Sequential/Parallel/IO/Buffer, utils
 │   ├── madmom-audio/          # signal, stft, spectrogram, filters, chroma, cepstrogram, hpss, comb_filters
-│   ├── madmom-ml/             # hmm, gmm, crf, inference (трейт + golden + triton)
+│   ├── madmom-ml/             # hmm, inference (golden-фикстуры + triton in-process/ONNX)
 │   ├── madmom-features/       # activations, onsets, beats, beats_hmm, beats_crf, downbeats, tempo, notes(+notes_hmm), chords, key
 │   ├── madmom-io/             # audio (wav/ffmpeg), events(txt), npy/npz, midi
 │   ├── madmom-eval/           # evaluation: onsets/beats/tempo/notes/chords/key
 │   ├── madmom/                # фасад: re-export + готовые пайплайны (BeatTracker и т.п.)
-│   └── madmom-cli/           # 25 бинарей, соответствие bin/*
+│   └── madmom-cli/           # 24 бинаря в v1 (bin/*, кроме evaluate/PickleProcessor)
 ├── tools/
 │   ├── dump_reference.py      # промежуточные эталонные дампы с собранного madmom
 │   ├── dump_preproc.py        # входы/выходы сетей эталона (граница локально/удалённо)
@@ -305,13 +415,13 @@ madmom-rs/
 | `madmom.audio.spectrogram` | `madmom_audio::spectrogram` |
 | `madmom.audio.filters` | `madmom_audio::filters` |
 | `madmom.audio.{chroma,cepstrogram,hpss,comb_filters}` | `madmom_audio::{chroma,cepstrogram,hpss,comb_filters}` |
-| `madmom.ml.hmm` / `.nn` / `.nn.layers` / `.gmm` / `.crf` | `madmom_ml::{hmm,nn,nn::layers,gmm,crf}` |
+| `madmom.ml.hmm` | `madmom_ml::hmm` (`.nn`/`.nn.layers` — не портируются, `.gmm`/`.crf` — ONNX) |
 | `madmom.models` (реестр) | `madmom_ml::models` |
 | `madmom.features` (`Activations`) | `madmom_features::activations` |
 | `madmom.features.{onsets,beats,beats_hmm,beats_crf,downbeats,tempo,notes,notes_hmm,chords,key}` | соответствующие модули `madmom_features::*` |
 | `madmom.io.{audio,__init__,midi}` | `madmom_io::{audio,events,midi}` (+`npy`) |
 | `madmom.evaluation.*` | `madmom_eval::*` |
-| `bin/*` (25 программ) | `madmom-cli` (`[[bin]]` × 25) |
+| `bin/*` (25 программ) | `madmom-cli` (`[[bin]]` × 24 в v1; `evaluate` отложен) |
 
 ### 3.3 Ключевые интерфейсы (это то, вокруг чего строится всё остальное)
 
@@ -346,11 +456,16 @@ pub struct HiddenMarkovModel { tm: TransitionModel, om: Box<dyn ObservationModel
       pub fn forward(&mut self, obs: &Array2<f64>, reset: bool) -> Array2<f64>; // нормализация по кадру
       pub fn forward_step(&mut self, obs: &[f64]) -> Vec<f64>;             // online (forward_generator)
   }
-// Инференс: локально (golden-фикстуры) или удалённо (Triton). NN-слои не реализуются (D1).
+// Инференс: golden-фикстуры (разработка/тесты) или Triton in-process (ONNX). Слои не реализуются (D1).
 pub enum InputShape { Frames(usize), FramesFreq(usize, usize), FramesFreqCh(usize, usize, usize) }
 pub trait ActivationModel { fn input_shape(&self) -> InputShape;
                             fn predict(&mut self, f: &ArrayD<f32>) -> Result<ArrayD<f32>>; }
-pub struct TritonModel { url, model_name, model_version, input_name, output_name, shape }
+pub struct TritonModel {                     // sync-фасад над infer_async (D1)
+    pub server: Arc<Server>, pub model_name: String, pub model_version: i64,
+    pub input_name: String, pub output_name: String, pub shape: InputShape,
+    pub runtime: tokio::runtime::Runtime,
+}
+pub trait ObservationSource { fn log_densities(&self, o: &Array2<f64>) -> Result<Array2<f64>>; }  // GMM → ONNX
 pub struct NeuralNetworkEnsemble { models: Vec<Box<dyn ActivationModel>>, ensemble: EnsembleFn }
   impl NeuralNetworkEnsemble { pub fn load(spec: &EnsembleSpec) -> Result<Self>; }
 
@@ -381,9 +496,9 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
    для каждого шага пайплайна (signal → frames → stft → spec → filt → log → diff →
    activations → path → detections) сохраняется массив в `.npy`, чтобы ловить
    ошибку на первой стадии, а не на последней.
-4. **Живой Triton** (feature `triton-live`, Task 2.4): если активации из Triton не
+4. **Triton in-process** (feature `triton-live`, Task 2.4): если активации из ONNX не
    совпали с `.npz`, дефект ищется сначала в пре-процессинге (`golden/preproc/*.npy`),
-   потом в конвертации модели — но это не повод менять допуск.
+   потом в ONNX-переносе модели — но это не повод менять допуск.
 
 ### 4.2 Допуски (пороги задаются ДО прогонов, менять их после получения данных нельзя)
 
@@ -421,15 +536,30 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
 |---|---|---|---|
 | 0 | каркас, devShell, контракт инференса, эталонные дампы | M | `cargo test` зелёный на каркасе + golden-режим + дампы эталона |
 | 1 | audio-ядро (signal→stft→spectrogram→filterbank→diff) | L | паритет с `tests/test_audio_*.py` |
-| 2 | пре-процессинг NN-входов + Triton-клиент (слои не портируем) | M | входы сетей = дампы эталона; активации из Triton = `.npz` |
+| 2 | пре-процессинг NN-входов + Triton in-process (ONNX) | M | входы сетей = дампы эталона; активации из ONNX = `.npz` |
 | 3 | `ml/hmm` + DBN/CRF биения, пик-пикинг онсетов, темп | M | `BeatTracker`/`DBNBeatTracker`/`OnsetDetector`/`TempoDetector` = `.txt` |
 | 4 | downbeats, notes (ADSR), key, chords (CRF), TCN, GMM-паттерны | L | остальные 12 программ CLI = `.txt` |
 | 5 | io/CLI/MIDI (25 программ, `single/batch/online`) | M | `tests/test_bin.py` (105 тестов) перенесён |
-| 6 | evaluation (метрики) + производительность + публикация | M | `madmom-eval` = `tests/test_evaluation_*.py`; бенчмарки |
+| 6 | производительность + публикация (`madmom-eval` отложен, вне первого релиза) | S | бенчмарки + документированные ограничения |
 
 ---
 
 ### Фаза 0 — каркас и инструменты
+
+#### Task 0.0: Сабмодули (иначе нечего собирать)
+
+**Files:** Modify — ничего; это предполётная проверка окружения.
+
+- [ ] Шаг 1: `git submodule update --init --recursive` — выкачиваются `third_party/madmom`
+      (исходники + фикстуры), вложенный `third_party/madmom/madmom/models` (92 `.pkl`, 35 МБ)
+      и `third_party/tritonserver-rs` вместе с его вложенным `core` (r24.08).
+- [ ] Шаг 2: проверить: `ls third_party/madmom/tests/data/activations | wc -l` → 24;
+      `find third_party/madmom/madmom/models -name '*.pkl' | wc -l` → 92;
+      `ls third_party/tritonserver-rs/core/include/triton/core/tritonserver.h` → есть.
+- [ ] Шаг 3: замечание по состоянию репозитория (не править без решения владельца):
+      в корневом `.gitmodules` остался `third_party/madmom_models`, но каталога нет —
+      модели фактически приходят из вложенного сабмодуля `madmom/models`. Либо удалить
+      лишнюю запись, либо выкачать её тоже (тогда будет два источника одних и тех же файлов).
 
 #### Task 0.1: Workspace и стиль
 
@@ -473,7 +603,8 @@ edition 2021+, `resolver = "2"`, общие `[workspace.dependencies]`.
 #### Task 0.4: Контракт инференса и golden-режим (модели не трогаем)
 
 Модели не конвертируем и не портируем: NN-инференс — на `tritonserver`
-(`tritonserver_rs`). Чтобы Фазы 3–5 не зависели от готовности Triton-репозитория,
+(`tritonserver-rs`, сабмодуль в `third_party/`). Чтобы Фазы 3–5 не зависели от
+готовности ONNX-репозитория (`third_party/madmom-models-onnx`, §2.1):
 активации берутся из двух источников за одним трейтом (детали — Фаза 2).
 
 **Files:** Create `crates/madmom-ml/src/inference.rs` (трейт),
@@ -485,8 +616,8 @@ edition 2021+, `resolver = "2"`, общие `[workspace.dependencies]`.
 - [ ] Шаг 1: трейт `ActivationModel` + `ActivationSource::GoldenFiles`.
 - [ ] Шаг 2 (тест): golden-источник отдаёт активации для `RNNBeatProcessor`-цепочки;
       downstream-стадии (HMM, пик-пикинг) работают без сети.
-- [ ] Шаг 3: отсутствие `MADMOM_TRITON_URL` даёт понятную ошибку только при выборе
-      `ActivationSource::Triton`, а не при старте и не в golden-режиме.
+- [ ] Шаг 3: отсутствие `MADMOM_MODEL_REPO`/репозитория даёт понятную ошибку только
+      при выборе `ActivationSource::TritonLocal`, а не при старте и не в golden-режиме.
 - [ ] Шаг 4: коммит `feat(ml): activation source contract (golden + triton stub)`.
 
 #### Task 0.5: Дампы промежуточных стадий эталона
@@ -649,7 +780,8 @@ Test `…/tests/{chroma,cepstrogram,hpss,comb_filters}.rs` (портироват
 
 Решение владельца: **NN-слои в Rust не портируются**. `madmom.ml.nn` (1454 строки
 слоёв + `activations.py` + Cython-компиляция `layers.py`) заменяется вызовом модели
-на `tritonserver` через `tritonserver_rs`. Обязательства сдвигаются: Rust обязан
+на `tritonserver` через `tritonserver-rs` (сабмодуль `third_party/tritonserver-rs`,
+CPU-only). Обязательства сдвигаются: Rust обязан
 воспроизвести **ровно тот вход**, который madmom подавал в первую сеть ансамбля, и
 правильно интерпретировать выход. Что именно строится (константы из исходников):
 
@@ -701,25 +833,70 @@ Create `tools/dump_preproc.py`; Test `crates/madmom-features/tests/preproc.rs`.
       `BEATS_TCN` (паддинг 2 кадра), `DOWNBEATS_BLSTM`, `CHROMA_DNN`, `KEY_CNN`.
 - [ ] Шаг 4: коммит `feat(features): NN input preprocessing builders`.
 
-#### Task 2.3: Triton-клиент (`tritonserver_rs`)
+#### Task 2.3: Triton in-process (`tritonserver-rs` 0.4.1)
 
 **Files:** Create `crates/madmom-ml/src/triton.rs`; Test `crates/madmom-ml/tests/triton_contract.rs`.
 
 **Interfaces (Produces):**
 ```rust
-pub struct TritonModel { pub url: String, pub model_name: String, pub model_version: Option<String>,
-                         pub input_name: String, pub output_name: String, pub shape: InputShape }
-impl ActivationModel for TritonModel { /* ... */ }
-// конфиг: madmom.toml [triton] url = "..."  |  env MADMOM_TRITON_URL
+pub struct TritonModel {                     // реализует ActivationModel (D1)
+    pub server: Arc<Server>,                 // один Server на процесс (D10)
+    pub model_name: String, pub model_version: i64,   // -1 = последняя
+    pub input_name: String, pub output_name: String,
+    pub shape: InputShape,
+    pub runtime: tokio::runtime::Runtime,    // синхронный фасад: block_on(infer_async)
+}
+pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + Server::new().await
+// madmom.toml: [triton] repository / backend_directory / model_version / control / cpu_only
 ```
 
-- [ ] Шаг 1: соединение и один инференс; ошибки → `MadmomError::Inference { model, cause }`.
-- [ ] Шаг 2: таймаут и один ретрай — сеть не должна «подвешивать» пайплайн.
-- [ ] Шаг 3: online-режим (1 кадр за вызов, 100 fps) — замер задержки; при провале
-      перейти на батчинг N кадров (DBN-трекер работает по forward-пути и терпим к задержке).
-- [ ] Шаг 4: коммит `feat(ml): triton inference client`.
+- [ ] Шаг 1: зависимость (сабмодуль в нашем репозитории):
+      `tritonserver-rs = { path = "../../third_party/tritonserver-rs", default-features = false }`
+      (из `crates/madmom-ml/Cargo.toml`; CPU-only — решение владельца, фича `gpu` не включается).
+      `third_party/tritonserver-rs` — сабмодуль (`github.com/UncleAndy/tritonserver-rs`, 0.4.1),
+      его вложенный `core` (r24.08, C-API-заголовки) уже выкачан; для чистого клона —
+      `git submodule update --init --recursive`. В devShell — `libclang` (`LIBCLANG_PATH`),
+      либа Triton и бэкенды — см. R16.
+- [ ] Шаг 2: `start_server`: `Options::new(repo)`, `.backend_directory(...)`,
+      `.model_control_mode(Control::Explicit)`, `.startup_model(name)`,
+      `.strict_model_config(true)`, `.exit_timeout(Duration::from_secs(5))`,
+      `.pinned_memory_pool_byte_size(0)`; `Server::new(opts).await`.
+- [ ] Шаг 3: один инференс (шаблон — `tritonserver-rs/examples/src/bin/audio_classification.rs`):
+      `server.create_request(name, -1)` → `request.add_default_allocator()` →
+      `request.add_input_with_dims(input_name, Buffer::from(slice), dims)?` →
+      `runtime.block_on(request.infer_async()?)` → `Response::get_output(output_name)`
+      → `Buffer::as_ref::<f32>()` → `ArrayD` нужной формы; ошибки →
+      `MadmomError::Inference { model, cause }`.
+      Ожидаемая форма `config.pbtxt` для наших моделей (по образцу `yamnet`):
+      `backend: "onnxruntime"`, `input { name: "..." data_type: TYPE_FP32 dims: [-1, <features>] }`
+      (`-1` — переменное число кадров; для CNN/TCN `dims: [-1, <freq>, <channels>]`),
+      `output { name: "..." data_type: TYPE_FP32 dims: [-1, <out>] }`, `max_batch_size: 0`
+      (батчинг по кадрам делает Rust, не Triton).
+- [ ] Шаг 4 (тест): `server.is_ready()` / `model_is_ready(name, -1)`; отсутствие
+      репозитория → понятная ошибка, а не паника.
+- [ ] Шаг 5: ансамбли: 8 моделей — 8 запросов через `futures::future::join_all`
+      в одном `block_on` (порядок усреднения фиксирован, D9).
+- [ ] Шаг 6: online-режим (1 кадр за вызов, 100 fps) — замер задержки; при провале
+      батчить N кадров (DBN-путь работает по forward-переменным и терпим к задержке).
+- [ ] Шаг 7: коммит `feat(ml): triton in-process inference (tritonserver-rs)`.
 
-#### Task 2.4: Паритет активаций через живой Triton
+#### Task 2.5: Приёмка ONNX-репозитория
+
+**Files:** Create `crates/madmom-ml/tests/onnx_repo.rs`; Test — требует `MADMOM_MODEL_REPO`.
+
+- [ ] Шаг 1 (тест): по спецификации §2.1 пройти по всем моделям репозитория и сверить:
+      имя/версия, имя и dtype входного и выходного тензора, форму входа; отсутствие
+      лишних/недостающих моделей (ожидаемый список — в §2.1).
+- [ ] Шаг 2 (тест): для каждой сети ансамбля подать эталонные признаки
+      (`tests/golden/preproc/*.npy`) и сверить выход с эталонным выходом **этой** сети
+      (`tests/golden/activations/<model>.npy`, снимается `tools/dump_preproc.py`),
+      допуск §4.2 (float32, `1e-4`). Это ловит ошибки конвертации по-модельно, до
+      сборки ансамбля.
+- [ ] Шаг 3 (тест): CPU-only — сервер стартует без CUDA (`pinned_memory_pool_byte_size(0)`,
+      `KIND_CPU`), `server.model_is_ready(name, -1)` истинно для всех моделей.
+- [ ] Шаг 4: коммит `test(ml): onnx repository acceptance`.
+
+#### Task 2.4: Паритет активаций через Triton (ONNX)
 
 - [ ] Шаг 1 (тест, feature `triton-live`): `RNNBeatProcessor` = `sample.beats_blstm.npz`
       (`max|Δ| ≤1e-4`), `RNNOnsetProcessor` = `sample.onsets_brnn.npz`,
@@ -840,12 +1017,13 @@ Test `…/tests/tempo.rs` (порт `tests/test_features_tempo.py`, 37 тест�
 | 4.2 | notes: `RNNPianoNoteProcessor`, `CNNPianoNoteProcessor`, `NoteOnsetPeakPickingProcessor`, `ADSRNoteTrackingProcessor` + `notes_hmm` (ADSR-пространство состояний/переходы/наблюдения) | `madmom-features/src/{notes,notes_hmm}.rs` | `tests/test_features_notes.py` (5) | `stereo_sample.piano_transcriptor.txt` |
 | 4.3 | chroma/deep chroma: `DeepChromaProcessor`, `CLPChromaProcessor` | `madmom-audio/src/chroma.rs` (дописать) | `tests/test_audio_chroma.py` (3) | `sample.deep_chroma.npz` |
 | 4.4 | key: `CNNKeyRecognitionProcessor`, `key_prediction_to_label`, 24 метки `KEY_LABELS` | `madmom-features/src/key.rs` | `tests/test_features_key.py` (2) | `sample.key_recognition.txt`, `sample2.key_recognition.txt` |
-| 4.5 | chords: `CNNChordFeatureProcessor` (супер-кадры/усреднение `_cnncfp_superframes/_avg`), `CRFChordRecognitionProcessor`, `DeepChromaChordRecognitionProcessor`, `ml::crf::ConditionalRandomField` | `madmom-features/src/chords.rs`, `madmom-ml/src/crf.rs` | `tests/test_features_chords.py` (6), `tests/test_ml_crf.py` (1) | `sample.cnn_chord_recognition.txt`, `sample.dc_chord_recognition.txt`, `sample2.*` |
-| 4.6 | GMM-трекер паттернов: `PatternTrackingProcessor`, `ml::gmm::{GMM, log_multivariate_normal_density, logsumexp}` | `madmom-features/src/downbeats.rs`, `madmom-ml/src/gmm.rs` | `tests/test_features_downbeats.py` | `sample.gmm_pattern_tracker.txt`, `sample.gmm_pattern_tracker.npz` |
+| 4.5 | chords: `CNNChordFeatureProcessor` (супер-кадры/усреднение `_cnncfp_superframes/_avg`), `CRFChordRecognitionProcessor`, `DeepChromaChordRecognitionProcessor`; CRF — **из ONNX** (решение 3) | `madmom-features/src/chords.rs` | `tests/test_features_chords.py` (6), `tests/test_ml_crf.py` (1) | `sample.cnn_chord_recognition.txt`, `sample.dc_chord_recognition.txt`, `sample2.*` |
+| 4.6 | GMM-трекер паттернов: `PatternTrackingProcessor` + `ObservationSource` (GMM — **из ONNX**, log-плотности batch-вызовом) | `madmom-features/src/downbeats.rs` | `tests/test_features_downbeats.py` | `sample.gmm_pattern_tracker.txt`, `sample.gmm_pattern_tracker.npz` |
 | 4.7 | multi-model: `MultiModelSelectionProcessor`, `MMBeatTracker` | `madmom-features/src/beats.rs` | `tests/test_bin.py` | `sample.mm_beat_tracker.txt` |
 
-Задачи 4.5 (CRF-аккорды) и 4.6 (GMM-паттерны) зависят от решения по R15: их модели
-не нейросетевые и в Triton как есть не поедут.
+Задачи 4.5 (CRF-аккорды) и 4.6 (GMM-паттерны) требуют ONNX-обёрток (решение 3): граф
+вокруг матриц CRF и вокруг log-плотностей GMM. Математика `ml/crf.py` и `ml/gmm.py` в
+Rust не портируется — наш объём только контракт входа/выхода и приёмка (см. R13, R15).
 
 Каждая задача: тесты из указанного файла madmom переносятся 1:1 (+ doctest-числа),
 сверка с фикстурой, коммит `feat(features): <задача>`.
@@ -894,7 +1072,7 @@ Test `…/tests/midi.rs` (порт `tests/test_utils_midi.py` + `tests/test_io_m
       `tests/data/annotations/*.mid`; байт-в-байт round-trip не требуется, но набор
       событий и тайминги (`tick2second`, sustain) обязаны совпасть.
 
-#### Task 5.4: CLI (`madmom-cli`, 25 бинарей)
+#### Task 5.4: CLI (`madmom-cli`, 24 бинаря в первом релизе)
 
 **Files:** Create `crates/madmom-cli/src/bin/*.rs`, `…/src/common.rs`;
 Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тестов).
@@ -905,25 +1083,29 @@ Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тест�
       CNNOnsetDetector ComplexFlux CRFBeatDetector DBNBeatTracker DBNDownBeatTracker
       DCChordRecognition GMMPatternTracker KeyRecognition LogFiltSpecFlux MMBeatTracker
       OnsetDetector OnsetDetectorLL PianoTranscriptor SpectralOnsetDetection SuperFlux
-      SuperFluxNN TCNBeatTracker TCNTempoDetector TempoDetector` (24 музыкальных)
-      + `evaluate` (фаза 6). `PickleProcessor` не портируется (D3).
+      SuperFluxNN TCNBeatTracker TCNTempoDetector TempoDetector` (24 бинаря).
+      `evaluate` отложен вместе с `madmom-eval` (решение 4), `PickleProcessor` не
+      портируется (D3) — из 25 программ madmom в первом релизе 24.
 - [ ] Шаг 3: end-to-end тест: каждый бинарь на `sample.wav` = соответствующий
       `tests/data/detections/*.txt` (побайтово, кроме заголовков).
 - [ ] Шаг 4: коммит `feat(cli): 24 programs mirroring bin/*`.
 
 ---
 
-### Фаза 6 — evaluation, производительность, публикация
+### Фаза 6 — производительность и публикация (`madmom-eval` отложен)
+
+Метрики (пункты 6.1–6.5) из первого релиза исключены решением 4; в силе остаются
+производительность и публикация, а также документирование ограничений.
 
 | # | задача | файлы | тесты-источники |
 |---|---|---|---|
-| 6.1 | `evaluation`: `EvaluationMixin`, `SimpleEvaluation`, `Evaluation`, `MultiClassEvaluation`, `SumEvaluation`, `MeanEvaluation`, `tostring/tocsv/totex`, `evaluation_io` | `madmom-eval/src/{lib,base}.rs` | `tests/test_evaluation.py` (19) |
-| 6.2 | онсеты/ноты: `onset_evaluation`, `note_onset_evaluation`, `remove_duplicate_notes` | `madmom-eval/src/{onsets,notes}.rs` | `tests/test_evaluation_onsets.py` (15), `…notes.py` (17) |
-| 6.3 | биения: `pscore`, `cemgil`, `goto`, `cml`, `continuity`, `information_gain`, `find_longest_continuous_segment` | `madmom-eval/src/beats.rs` | `tests/test_evaluation_beats.py` (56) |
-| 6.4 | темп/тональность/аккорды: `tempo_evaluation`, `key_label_to_class`, `score_root/score_exact`, `segmentation`, `reduce_to_triads` | `madmom-eval/src/{tempo,key,chords}.rs` | `…tempo.py` (18), `…key.py` (7), `…chords.py` (23) |
-| 6.5 | бинарь `evaluate` + `bin/evaluate` CLI | `madmom-cli/src/bin/evaluate.rs` | `tests/test_bin_evaluate.py` (7) |
-| 6.6 | производительность: профиль по стадиям (spectrogram/NN/Viterbi), цель — не медленнее madmom на `sample.wav`, отчёт `benches/` | `crates/*/benches/` | — |
-| 6.7 | публикация: `README.md` (лицензии: код BSD, модели CC BY-NC-SA), `models/README`, doc-тесты, crates.io-метаданные, CI (`.github/workflows/ci.yml`: fmt, clippy, test, reference-parity) | корень | — |
+| ~~6.1~~ | ~~`evaluation`: `EvaluationMixin`, `SimpleEvaluation`, `Evaluation`, …~~ **отложено (решение 4)** | — | — |
+| ~~6.2~~ (отложено) | онсеты/ноты: `onset_evaluation`, `note_onset_evaluation`, `remove_duplicate_notes` | `madmom-eval/src/{onsets,notes}.rs` | `tests/test_evaluation_onsets.py` (15), `…notes.py` (17) |
+| ~~6.3~~ (отложено) | биения: `pscore`, `cemgil`, `goto`, `cml`, `continuity`, `information_gain`, `find_longest_continuous_segment` | `madmom-eval/src/beats.rs` | `tests/test_evaluation_beats.py` (56) |
+| ~~6.4~~ (отложено) | темп/тональность/аккорды: `tempo_evaluation`, `key_label_to_class`, `score_root/score_exact`, `segmentation`, `reduce_to_triads` | `madmom-eval/src/{tempo,key,chords}.rs` | `…tempo.py` (18), `…key.py` (7), `…chords.py` (23) |
+| ~~6.5~~ (отложено) | бинарь `evaluate` + `bin/evaluate` CLI | `madmom-cli/src/bin/evaluate.rs` | `tests/test_bin_evaluate.py` (7) |
+| 6.6 | производительность: профиль по стадиям (spectrogram / ONNX-инференс / Viterbi), цель — не медленнее madmom на `sample.wav`, отчёт `benches/` | `crates/*/benches/` | — |
+| 6.7 | публикация: `README.md` (лицензии: код BSD, модели CC BY-NC-SA отдельно), описание ONNX-репозитория и требований Triton (R16), doc-тесты, crates.io-метаданные, CI (`.github/workflows/ci.yml`: fmt, clippy, test, golden-parity; `triton-live` — отдельным job в контейнере) | корень | — |
 
 ---
 
@@ -943,17 +1125,22 @@ Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тест�
 | R10 | MIDI: 1400+ строк событий (форк mido) | отдельная задача 5.3; не блокирует музыкальные пайплайны (используется только `PianoTranscriptor --output_format midi` и evaluation) |
 | R11 | `sklearn` в `ml/gmm.py::fit` (обучение GMM) | не портируется (инференс — чистый numpy) |
 | R12 | Эталон madmom собирается с Cython/opencv/pyfftw; часть тестов может не пройти на этой машине | зафиксировать baseline в Фазе 0 (Task 0.3) и не выдумывать результаты |
-| R13 | Готовность Triton-репозитория (92 сети → формат Triton: multi-task TCN, CNN с 3-D входом, 8-сетевые ансамбли) | блокирует только Task 2.4; Фазы 3–5 идут в golden-режиме. Нужны от владельца: имя/версия крейта `tritonserver_rs`, протокол (gRPC/HTTP), имена и версии моделей и тензоров |
-| R14 | Задержка online-инференса (1 кадр за вызов при 100 fps) | замер в Task 2.3 шаг 3; при провале — батчинг N кадров (DBN-путь работает по forward-переменным и терпим к задержке) |
-| R15 | Не-NN модели всё ещё pickle: `chords/*` (`ConditionalRandomField`) и `patterns/*` (`GMM`) — Triton их как есть не обслуживает | блокирует задачи 4.5 (CRF-аккорды) и 4.6 (GMM-паттерны): либо ручной перенос матриц (W/A/pi/tau/c; weights/means/covars) в Rust-файлы, либо отдельный мини-сервис. Нужно решение владельца |
+| R13 | ONNX-репозиторий моделей: 92 сети + CRF + GMM; 8-сетевые ансамбли (8 моделей или одна ансамблевая); `config.pbtxt`, имена/версии моделей и тензоров, dtype (ожидается float32), форма входа (2-D/3-D) | блокирует Task 2.4 и задачи 4.5/4.6; Фазы 3–5 идут в golden-режиме. Нужны от владельца: имена моделей и тензоров + как представлены ансамбли |
+| R14 | Задержка online-инференса (1 кадр за вызов при 100 fps) | инференс локальный (in-process, не сеть), но вызов на кадр дорог: замер в Task 2.3 шаг 6; при провале — батчинг N кадров |
+| R15 | Не-NN модели: `ConditionalRandomField` (аккорды) и `GMM` (паттерны) | **решено**: перенос в ONNX (решение 3). Наш объём — контракт (batch на файл; выход: последовательность состояний для CRF, log-плотности для GMM) и приёмка; математика не портируется |
+| R16 | Сборка и деплой Triton: нужны `libtritonserver.so`, бинарники бэкендов (ONNX Runtime), `libclang` для bindgen | **режим выбран: CPU-only** (`default-features = false`, `pinned_memory_pool_byte_size(0)`, `KIND_CPU`); GPU — отдельной фичей позже. Осталось выбрать способ получения либы: контейнер Triton 24.08+ (`third_party/tritonserver-rs/Dockerfile.dev`) или сборка `core` из его сабмодуля как nix-деривация |
+| R17 | Проверка сборки в этой среде невозможна: `cargo` в sandbox отсутствует, сети нет (crates не скачать), либы Triton нет | сборка и прогоны — на хосте владельца; в плане даны точные команды, выдуманных результатов нет |
 
 ## 7. Что не портируется
 
 - `Processor.load/dump`, `pickle_processor`, `bin/PickleProcessor` — сериализация Python-объектов.
 - `madmom/__init__.py` (doctest-инфраструктура, `_OutputChecker`, `__version__`).
 - `madmom/ml/nn/*` — слои, активации, ансамбль (1454+ строк и Cython-компиляция):
-  инференс удалённый, через Triton (D1).
+  заменяются ONNX-моделями, инференс — Triton in-process (D1).
+- `ml/gmm.py` и `ml/crf.py` как математика — CRF и GMM уезжают в ONNX (D2, R15).
 - `ml/gmm.py::GMM.fit`, `ml/nn`-обучение, `hpss`-тренировочные утилиты — только инференс.
+- `madmom/evaluation/*` и `bin/evaluate` — отложены, вне первого релиза (решение 4);
+  тесты `tests/test_evaluation_*.py` и `tests/test_bin_evaluate.py` тоже отложены.
 - `audio/signal.py::Stream`, `process_online` из `processors.py` (живой вход PyAudio).
 - Ускорения `pyfftw` и `cv2.filter2D` — заменяются на `rustfft` и одну реализацию свёртки.
 - `madmom/utils/stats.py::mcnemar_test` — только если понадобится в `madmom-eval`.
@@ -963,6 +1150,9 @@ Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тест�
 ## 8. Справочные команды
 
 ```bash
+# 0. Сабмодули (включая вложенные: madmom/models и tritonserver-rs/core)
+git submodule update --init --recursive
+
 # 1. Эталон: сборка расширений и baseline тестов (Фаза 0)
 nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.cython ps.pytest ps.packaging])' --run \
   'cd third_party/madmom && python3 setup.py build_ext --inplace && python3 -m pytest tests -q'
@@ -971,15 +1161,23 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.cython ps.pytest ps
 nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy])' --run \
   'python3 tools/dump_reference.py --audio third_party/madmom/tests/data/audio/sample.wav --out tests/golden'
 
-# 3. Дампы входов/выходов сетей эталона — контракт для Triton (Фаза 2)
+# 3. Дампы входов/выходов сетей эталона — контракт для ONNX-моделей (Фаза 2)
 nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy])' --run \
   'python3 tools/dump_preproc.py --out tests/golden/preproc'
+
+# 3b. Конвертация моделей в ONNX (по §2.1; источник — 92 .pkl из сабмодуля madmom)
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.onnx])' --run \
+  'python3 tools/convert_to_onnx.py \
+     --src third_party/madmom/madmom/models \
+     --dst third_party/madmom-models-onnx/models'
 
 # 4. Проверка порта (golden-режим, без сети)
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 
-# 5. Проверка с живым Triton (Task 2.4)
-MADMOM_TRITON_URL=localhost:8001 cargo test -p madmom-features --features triton-live
+# 5. Проверка с Triton in-process (Task 2.4) — нужны libtritonserver + бэкенды (R16)
+MADMOM_MODEL_REPO=$PWD/../tritonserver-rs/models \
+MADMOM_TRITON_BACKENDS=/opt/tritonserver/backends \
+cargo test -p madmom-features --features triton-live
 
 # 6. End-to-end паритет
 target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav \
@@ -990,26 +1188,35 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
 
 **Принято (2026-11-15):**
 
-1. **Порядок фаз** — начинаем с «флагманов»: биения / онсеты / темп (Фаза 3), как в плане.
+1. **Порядок фаз** — «флагманы» (биения / онсеты / темп) первыми (Фаза 3).
 2. **MIDI** — `midly` + переходный слой событий (Task 5.3).
 3. **Имя публичного крейта** — `madmom-rs`.
-4. **NN-инференс** — через `tritonserver` (`tritonserver_rs`), модели не конвертируем и
-   не трогаем (D1/D2/D10, Фаза 2). Фазы 3–5 разрабатываются в golden-режиме и от
-   готовности Triton не зависят.
-5. **`madmom-eval`** — пояснение дано, решение по объёму ещё не принято (вопрос 4 ниже).
+4. **Не-NN модели** (CRF аккордов, GMM паттернов) — перенос в ONNX; уточнение контракта
+   (GMM — целиком в графе; CRF — граф отдаёт emission/transition/initial/final, Viterbi
+   в Rust) в §2.2.
+5. **NN-инференс** — `tritonserver-rs` **in-process** (bindings к C-API Triton,
+   `libtritonserver.so`), модели — ONNX-репозиторий (§2.1); NN-слои в Rust не
+   портируются (D1/D2/D10, Фаза 2). Сабмодуль — `third_party/tritonserver-rs`.
+6. **CPU-only** (решение владельца): `default-features = false`,
+   `pinned_memory_pool_byte_size(0)`, `instance_group KIND_CPU`; GPU — отдельной фичей позже.
+7. **`madmom-eval`** (метрики) — отложен, вне первого релиза; `bin/evaluate` и тесты
+   `test_evaluation_*`/`test_bin_evaluate` тоже. CLI первого релиза — 24 программы.
+8. **Спецификация ONNX-репозитория** (имена, раскладка, тензоры, ансамбли, отображение
+   слоёв) и **контракт CRF/GMM** — приняты мной и зафиксированы в §2.1 и §2.2
+   (владелец делегировал: «на твоё усмотрение»).
 
 **Осталось решить:**
 
-1. **`tritonserver_rs`** — точное имя и версия крейта, протокол (gRPC/HTTP), форма API
-   (в `~/.cargo` и `~/projects/RUST` такого крейта нет, сети в этой среде тоже нет —
-   уточнить у владельца, чтобы Task 2.3 не строился на догадке).
-2. **Triton-репозиторий** (R13): кто и как конвертирует 92 сети; как представлены
-   8-сетевые ансамбли (8 моделей или одна ансамблевая); имена и версии моделей и
-   входных/выходных тензоров; батчинг для online.
-3. **Не-NN модели** (R15): CRF аккордов и GMM паттернов — ручной перенос матриц в Rust
-   или отдельный мини-сервис? Блокирует задачи 4.5 и 4.6.
-4. **`madmom-eval`** (Фаза 6): 4447 строк метрик (биения P-score/Cemgil/Goto/CML/
-   continuity, онсеты/ноты/темп/тональность/аккорды, 126 тестов, ~5–6 тыс. строк Rust).
-   Нужен ли в первом релизе (ценность: измерить свои результаты и сравнить с
-   опубликованными числами без Python) или отдельным крейтом позже? Можно начать с
-   подмножества `onsets` + `beats`. MIR-пайплайны от него не зависят.
+1. **Способ получения `libtritonserver.so` + бэкендов** (R16): контейнер Triton 24.08+
+   (`third_party/tritonserver-rs/Dockerfile.dev`, как в `examples/`) или сборка `core`
+   из сабмодуля как nix-деривация. Нужен выбранный путь, чтобы `flake.nix` devShell и CI
+   были воспроизводимыми; на этой машине ни либы, ни `/opt/tritonserver`, ни CUDA нет.
+2. **Репозиторий ONNX-моделей** (§2.1): я заложил `third_party/madmom-models-onnx/models`
+   как отдельный репозиторий/сабмодуль (лицензия моделей CC BY-NC-SA). Если владелец
+   предпочтёт другое место (например, рядом с `tritonserver-rs/examples/models/`) —
+   назвать путь, план поправлю.
+3. **Кто запускает конвертацию** (`tools/convert_to_onnx.py`, §2.1): скрипт пишем мы,
+   запуск — на стороне владельца (как и было решено). Нужно ли, чтобы скрипт был готов
+   до начала Фазы 2 (рекомендую: да, иначе Task 2.5 нечего принимать).
+4. **Лишняя запись в `.gitmodules`** (`third_party/madmom_models` без каталога, Task 0.0
+   шаг 3): удалить или выкачать? Правки в чужие/свои подмодули без решения владельца не делаю.
