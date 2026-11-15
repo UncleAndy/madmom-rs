@@ -1214,6 +1214,39 @@ Create `tools/dump_preproc.py`; Test `crates/madmom-features/tests/preproc.rs`.
   `git submodule update --init --recursive` — в песочнице это лишний шаг, но вреда не несёт
   (сабмодуль `core` уже выкачан, план Шаг 1).
 
+#### Task 2.3 — сделано (движок работает)
+
+`crates/madmom-ml/src/triton.rs`: `TritonConfig` + `TritonModel` (`ActivationModel`).
+Сервер стартует, ONNX-бэкенд грузит модель, запрос проходит, активации возвращаются.
+Тест `crates/madmom-ml/tests/triton_live.rs` (фича `triton-live`) — зелёный.
+
+Что выяснилось и учтено:
+
+- биндинги захватывают `tokio::runtime::Handle::current()` при старте сервера, поэтому
+  модель владеет `Runtime` и все вызовы идут через него (`futures::executor::block_on`
+  недостаточно), и рантайм обязан жить дольше сервера;
+- `Control::Explicit` сам ничего не грузит: модель запрашивается явно (`load_model`) и
+  затем опрашивается до готовности, иначе первый запрос падает `unknown model`;
+- бэкенд ONNX Runtime жёстко ставит `INSTALL_RPATH "$ORIGIN"` (его CMakeLists, строки
+  269/280), так что `-DCMAKE_INSTALL_RPATH` не действует и линковки мало: сборочный
+  скрипт кладёт `libonnxruntime.so*` рядом с бэкендом, куда `$ORIGIN` и указывает;
+- `tritonserver-rs` исключён из workspace: path-зависимость внутри каталога workspace —
+  неявный участник, из-за чего любая сборка `--workspace` тянула его с его default-фичами
+  (`gpu` → bindgen, cuda-driver-sys) и clippy падала на его build-скрипте;
+- сборка с фичей требует `RUSTFLAGS="-L $PWD/third_party/triton-runtime/lib64"` и
+  `LD_LIBRARY_PATH` на тот же каталог: bindings выдают только `cargo:rustc-link-lib`
+  без search path.
+
+**Проверка на настоящей модели** (не на примере): `chroma_dnn`, 20 кадров по 1575
+признаков, входные данные одни и те же — движок против madmom:
+`max_abs_diff = 1.6e-07`, `cosine = 1.0000000`. По дороге нашлись три дефекта
+конвертера (IR-версия 13 против максимума 10 у вендорного ORT; ширина входа из
+таблицы вместо весов; выход всегда 1 вместо 12) — исправлены, коммит `8662cda`.
+
+Осталось для «настоящего инференса всех сетей»: ONNX-графы семейств, которых ещё нет
+(recurrent с пипхолами через примитивные операции, cnn/tcn/crf/gmm) — это Task 2.5 и
+Phase 4.
+
 #### Task 2.3: Triton in-process (`tritonserver-rs` 0.4.1)
 
 **Files:** Create `crates/madmom-ml/src/triton.rs`; Test `crates/madmom-ml/tests/triton_contract.rs`.
