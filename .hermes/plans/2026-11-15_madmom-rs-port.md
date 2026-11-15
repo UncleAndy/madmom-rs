@@ -547,6 +547,49 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
 
 ### Фаза 0 — каркас и инструменты
 
+### Фаза 0 — статус (2026-11-15, авторская среда)
+
+**Сделано и проверено здесь:**
+
+- каркас workspace: `Cargo.toml` (8 крейтов), `rustfmt.toml`, обновлённый `.gitignore`;
+- `flake.nix` — devShell (rust, python+scipy/cython/pytest, cmake, gcc, libclang, ffmpeg),
+  проверен `nix-instantiate --parse`; **не вычислялся** (нет сети для nixpkgs);
+- `tools/build_reference.sh`, `tools/build_triton_core.sh`, `tools/build_onnx_backend.sh`,
+  `tools/triton_env.sh`, `madmom.toml` — проверены `bash -n` / разбором TOML;
+- `crates/madmom-io/src/npy.rs` — читатель `.npy`/`.npz` без внешних зависимостей:
+  **собран и прогнан здесь** `rustc --test` → 6/6 тестов на реальных фикстурах
+  (281 значение, `fps=100`, 2-D активации, object-`fps` в `beats_tcn_tempo.npz`,
+  отсутствующий член, паддинг заголовка);
+- `crates/madmom-testkit/src/lib.rs` — допуски из §4.2 в виде констант, загрузка фикстур,
+  `assert_array_close{,_labeled}`, `assert_detections_close`;
+- `crates/madmom-ml/src/inference.rs` — трейт `ActivationModel`, `InputShape`,
+  `ActivationSource::{GoldenFiles, TritonLocal}` (`triton-live` опционален; без фичи сборка
+  не требует `libtritonserver.so`), `TritonLocal` возвращает `NotImplemented`, а не паникует;
+- `tools/dump_reference.py`, `tools/dump_preproc.py` — постадийные и посетевые дампы
+  (цепочка берётся из самого madmom, поэтому не может разойтись с эталоном);
+- `tools/onnx_spec.py` + `tools/convert_to_onnx.py` + `tools/tests/test_convert.py`:
+  загрузчик pickle (оба шима NumPy 2), инвентарь слоёв, спецификация репозитория (§2.1),
+  генерация `config.pbtxt`; тесты: **5 passed, 1 skipped** (пропуск — построение графов,
+  нужен пакет `onnx`);
+- факты по моделям, полученные инструментами (не из головы): 92 файла, семейства
+  `blstm=24 bgru=12 brnn=17 cnn=10 lstm=8 rnn=8 tcn=8 crf=2 gmm=2 feedforward=1`;
+  `beats_lstm_1` = 3 слоя LSTM по 25 скрытых, веса на гейтах `(162,25)`;
+  `patterns/*` — это **dict**, внутри которого GMM.
+
+**Не проверено здесь (нужен хост):** `cargo build/test` (нет cargo и сети),
+вычисление `flake.nix`, сборка `libtritonserver.so` + ONNX Runtime backend,
+сборка эталона madmom и baseline, смоук-инференс, ONNX-графы (`onnx.checker`
+не на чем запустить), числовые проверки графов против эталонных активаций.
+
+**Заблокировано:** часть `git add`/`git commit` падает с
+`insufficient permission ... .git/objects`: 8 подкаталогов `.git/objects/{17,23,46,89,99,bf,d1,db}`
+принадлежат `nobody:nogroup` и запись в них для пользователя `hermes` запрещена
+(`touch` там же не проходит), хотя `.git/objects` доступен. Коммиты 0.1 (каркас),
+0.2 (flake+скрипты), 0.4 (testkit) и 0.8 (конвертер) прошли; каркас, `flake.nix`,
+`madmom.toml`, скрипты и `inference.rs` лежат в индексе/рабочем дереве без коммита.
+Правку прав собственности делаю только по явной просьбе.
+
+
 #### Task 0.0: Сабмодули (иначе нечего собирать)
 
 **Files:** Modify — ничего; это предполётная проверка окружения.
