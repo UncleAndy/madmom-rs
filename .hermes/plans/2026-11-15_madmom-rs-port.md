@@ -1398,15 +1398,35 @@ Test `…/tests/tempo.rs` (порт `tests/test_features_tempo.py`, 37 тест�
 **Константы:** `METHOD='comb'`, `ALPHA=0.79`, `MIN_BPM=40`, `MAX_BPM=250`,
 `ACT_SMOOTH=0.14`, `HIST_SMOOTH=9`, `HIST_BUFFER=10.0`, `NO_TEMPO=NaN`.
 
-- [ ] Шаг 1 (тест): `interval_histogram_acf`, `interval_histogram_comb`
-      (банк гребёнчатых фильтров, `feed_backward`), `dominant_interval`.
-- [ ] Шаг 2 (тест): `detect_tempo` (в т.ч. `interpolate=True` — `interp1d('quadratic')`,
-      шаг 0.01; `argrelmax(mode='wrap')`; нормализация strengths; случаи 0/1/>1 пиков).
-- [ ] Шаг 3 (тест): `TempoEstimationProcessor` (`fps`, `min_bpm/max_bpm`,
-      `histogram_processor`, online-режим), `TCNTempoHistogramProcessor`
-      (вход — пары из TCN) = `sample.tcn_tempo_detector.txt`;
-      `TempoDetector` = `sample.tempo_detector.txt`.
-- [ ] Шаг 4: коммит `feat(features): tempo estimation`.
+**Статус (2026-11-15): офлайн-часть сделана, сверена с эталоном.**
+
+- [x] Шаг 1 (тест): `interval_histogram_acf`, `interval_histogram_comb` (банк гребёнчатых
+      фильтров, `feed_backward`), `dominant_interval` — сделано
+      (`crates/madmom-audio/src/comb_filters.rs` + `crates/madmom-features/src/tempo.rs`).
+- [x] Шаг 2 (тест): `detect_tempo` — сделано **без** `interpolate=True`; `argrelmax`
+      (`mode='wrap'`) перенесён в `madmom-core::scipy` и сверен с scipy напрямую (строгое
+      `>`, поэтому плато не даёт пика; заворот концов). `interpolate=True` **отложено и
+      отказывает типизированной ошибкой** (`TempoError::InterpolationNotPorted`): нужна
+      квадратичная B-сплайн интерполяция scipy (`interp1d(..., 'quadratic')`,
+      not-a-knot). Дампы для неё сняты, разрыв измерим.
+- [x] Шаг 3 (тест): `TempoEstimationProcessor` (офлайн), `CombFilter/ACF/DBN/TCN`
+      histogram processors, `TCNTempoHistogramProcessor` — сделано. Онлайн-режим
+      (`process_online`, буферы, `hist_buffer`) **отложен**.
+- [x] Шаг 4: коммит `feat(features): tempo estimation`.
+
+**Сверка (26 дампов, `tools/dump_tempo.py` → `tests/golden/tempo/`):**
+
+```
+comb-гистограмма        8.882e-16   (после округления alpha до f32 — иначе 4.378e-07)
+acf-гистограмма         3.331e-16
+DBN-гистограмма         0.000e+00   (счёт интервалов по пути Витерби, всего 281)
+tempi (comb/acf/dbn)    ≤1.110e-16
+TCN: гистограмма и tempi — совпадение, 14 и 9 строк
+```
+
+Ловушка, которую вскрыл дамп: в Cython-хелпере эталона `alpha` объявлен как C `float`,
+то есть гребёнчатый фильтр работает с **округлённым до f32** множителем (сигнал при этом
+остаётся float64), а `feed_forward` — чистый numpy и остаётся f64.
 
 ---
 

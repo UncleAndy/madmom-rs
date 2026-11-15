@@ -158,6 +158,35 @@ Two traps this dump already paid for:
   (`fortran_order: True`). A reader that ignores the flag hands out a transposed array;
   `madmom-io` now reorders on read (`reads_fortran_ordered_arrays_in_c_order`).
 
+## Tempo estimation (`tempo/`)
+
+Produced by `tools/dump_tempo.py`, which walks madmom's own processors over the reference
+activation fixtures:
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_tempo.py third_party/madmom"
+```
+
+Twenty-six cases on `sample.beats_blstm.npz` (281 frames at 100 fps) plus
+`sample.beats_tcn_tempo.npz` for the multi-task TCN tempo layer: the comb and
+autocorrelation interval histograms (function level and through
+`CombFilterTempoHistogramProcessor` / `ACFTempoHistogramProcessor`), the DBN one, the
+smoothed variants, the smoothed activations, `dominant_interval`, the detected tempi of all
+three frame-based sources, and the TCN histogram and tempi (default and `hist_smooth=15`).
+
+`crates/madmom-features/tests/tempo_golden.rs` requires agreement within the plan's `f64`
+bounds; the largest difference observed is **8.882e-16** (the comb histogram), the DBN
+histogram is exact. The dumps already paid for one trap: the reference's Cython helper
+declares `float alpha`, so the backward comb filter runs with a **float32-rounded** scaling
+factor while the signal stays float64. Ignoring that rounding put the comb histogram
+4.378e-07 away from the reference (and the smoothed histogram just outside the 1e-6 bound).
+
+`interpolate=True` is refused with a typed error, not approximated: it needs scipy's
+quadratic B-spline interpolation (`interp1d(..., 'quadratic')`). Its dumps
+(`detect_tempo_hist_interp.npy`, `tempi_comb_interp.npy`) are in place, so the gap is
+measurable when that lands.
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):
