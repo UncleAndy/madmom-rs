@@ -1175,6 +1175,37 @@ Create `tools/dump_preproc.py`; Test `crates/madmom-features/tests/preproc.rs`.
       `BEATS_TCN` (паддинг 2 кадра), `DOWNBEATS_BLSTM`, `CHROMA_DNN`, `KEY_CNN`.
 - [ ] Шаг 4: коммит `feat(features): NN input preprocessing builders`.
 
+#### Сборка рантайма (перед Task 2.3)
+
+Собирается в песочнице, из сабмодулей как есть (`tools/build_triton_core.sh` →
+`build/triton-core-build.log`, `tools/build_onnx_backend.sh` → `build/ort-backend-build.log`;
+общее окружение — `tools/triton_build_env.sh`). Коммит `89ccdd5`.
+
+- **Бэкенд ONNX Runtime — собран**: `third_party/triton-runtime/backends/onnxruntime/libtriton_onnxruntime.so`,
+  ONNX Runtime 1.18.1 в `third_party/triton-runtime/onnxruntime/`. Раскладка — та, которую ищет
+  Triton (`backends/<имя>/libtriton_<имя>.so`).
+- **Ядро** (`libtritonserver.so`) — собирается; `CMAKE_INSTALL_LIBDIR=lib` обязателен, иначе
+  ядро не находит собственные third-party (protobuf/re2/abseil): оно ищет их по захардкоженному
+  `LIB_DIR`, который равен `lib` везде, кроме CentOS, а GNUInstallDirs ставит в `lib64`.
+- protobuf, Abseil, re2, googletest ядро собирает **само** из `third-party@r24.08`; из nixpkgs
+  берутся только RapidJSON, numactl и Boost (nixpkgs protobuf 34 против r24.08 не компилируется:
+  `field->name()` там `string_view`, а `JsonPrintOptions::always_print_primitive_fields` удалён).
+- Ловушки окружения: в песочнице нет `/bin/sh` и `/usr/bin/env` (создаются в том же вызове, что
+  и сборка); CMake 4 требует `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` для pybind11 из r24.08;
+  `-include cstdint` для `triton-common/error.h`; `-Wno-error=maybe-uninitialized` (GCC 15) в
+  `CMAKE_CXX_FLAGS_RELEASE`, чтобы он оказался позже `-Werror` самого проекта.
+
+**Что выяснилось про `tritonserver-rs` 0.4.1 (влияет на шаги ниже):**
+
+- `Options` **не отдаёт** `backend_directory` (`Options.0` — `pub(crate)`, извне не достать),
+  а у ядра путь по умолчанию захардкожен: `backend_dir_("/opt/tritonserver/backends")`
+  (`core/src/tritonserver.cc:404`). Для дымового теста — симлинк
+  `/opt/tritonserver/backends` → `third_party/triton-runtime/backends`; «чистая» альтернатива —
+  добавить в биндинги `Options::backend_directory()` (5 строк, правит сабмодуль → **нужно
+  решение владельца**).
+- `Server::new(options)` — `async`. Достаточно `futures::executor::block_on` (tokio не нужен,
+  если не хочется тянуть рантайм; `futures` уже в зависимостях биндингов).
+
 #### Task 2.3: Triton in-process (`tritonserver-rs` 0.4.1)
 
 **Files:** Create `crates/madmom-ml/src/triton.rs`; Test `crates/madmom-ml/tests/triton_contract.rs`.
@@ -1199,7 +1230,9 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
       его вложенный `core` (r24.08, C-API-заголовки) уже выкачан; для чистого клона —
       `git submodule update --init --recursive`. В devShell — `libclang` (`LIBCLANG_PATH`),
       либа Triton и бэкенды — см. R16.
-- [ ] Шаг 2: `start_server`: `Options::new(repo)`, `.backend_directory(...)`,
+- [ ] Шаг 2: `start_server`: `Options::new(repo)` (⚠ `.backend_directory(...)` **в биндингах
+      отсутствует** — см. «Сборка рантайма» выше: либо симлинк `/opt/tritonserver/backends`,
+      либо правка биндингов по решению владельца),
       `.model_control_mode(Control::Explicit)`, `.startup_model(name)`,
       `.strict_model_config(true)`, `.exit_timeout(Duration::from_secs(5))`,
       `.pinned_memory_pool_byte_size(0)`; `Server::new(opts).await`.
