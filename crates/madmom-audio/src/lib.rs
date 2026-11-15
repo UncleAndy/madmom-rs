@@ -9,6 +9,8 @@
 //! - [`stft`] — `madmom/audio/stft.py`: the short-time Fourier transform, its windows
 //!   and the bin frequencies.
 //! - [`filters`] — `madmom/audio/filters.py`: frequency scales, filters and filterbanks.
+//! - [`comb_filters`] — `madmom/audio/comb_filters.py`: feed forward/backward comb
+//!   filters and their bank (the tempo histogram's resonators).
 //! - [`spectrogram`] — `madmom/audio/spectrogram.py`: magnitudes, filtering, logarithmic
 //!   scaling and temporal differences.
 //!
@@ -19,6 +21,7 @@
 
 #![deny(missing_docs)]
 
+pub mod comb_filters;
 pub mod filters;
 pub mod signal;
 pub mod spectrogram;

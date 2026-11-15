@@ -48,6 +48,9 @@ dependencies = [
 [[package]]
 name = "madmom-core"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "madmom-features"

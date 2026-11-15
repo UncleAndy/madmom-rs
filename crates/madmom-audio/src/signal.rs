@@ -331,6 +331,63 @@ pub fn smooth(signal: ArrayViewD<'_, f32>, kernel: &Smoothing) -> Result<ArrayD<
     }
 }
 
+/// A symmetric Hamming window of `size` samples in `f64`, as `np.hamming` builds it.
+///
+/// The `f32` [`hamming`] is what the signal/spectrogram pipeline needs; the tempo module
+/// works in `f64` (madmom casts its activations with `astype(float)`), and smoothing them
+/// with a rounded kernel would not reach the plan's tolerance for `f64` DSP.
+pub fn hamming_f64(size: usize) -> Array1<f64> {
+    let mut window = Array1::zeros(size);
+    if size == 0 {
+        return window;
+    }
+    if size == 1 {
+        window[0] = 1.0;
+        return window;
+    }
+    let denominator = (size - 1) as f64;
+    for (n, value) in window.iter_mut().enumerate() {
+        *value = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / denominator).cos();
+    }
+    window
+}
+
+/// [`convolve_same`] in `f64`, with the accumulation kept in `f64` as well.
+pub fn convolve_same_f64(signal: ArrayView1<'_, f64>, kernel: ArrayView1<'_, f64>) -> Array1<f64> {
+    let (n, k) = (signal.len(), kernel.len());
+    if n == 0 || k == 0 {
+        return Array1::zeros(n.max(k));
+    }
+    let mut full = vec![0.0f64; n + k - 1];
+    for (i, &s) in signal.iter().enumerate() {
+        if s == 0.0 {
+            continue;
+        }
+        for (j, &kv) in kernel.iter().enumerate() {
+            full[i + j] += s * kv;
+        }
+    }
+    let out_len = n.max(k);
+    let start = (n.min(k) - 1) / 2;
+    let mut out = Array1::zeros(out_len);
+    for (i, value) in out.iter_mut().enumerate() {
+        if let Some(v) = full.get(start + i) {
+            *value = *v;
+        }
+    }
+    out
+}
+
+/// Smooth a 1-D `f64` signal with a Hamming window of `size` (madmom: `smooth(signal, n)`).
+///
+/// Sizes 0 and 1 return the signal unchanged, matching the reference's early exits.
+pub fn smooth_f64(signal: ArrayView1<'_, f64>, size: usize) -> Result<Array1<f64>, SignalError> {
+    match size {
+        0 | 1 => Ok(signal.to_owned()),
+        size => Ok(convolve_same_f64(signal, hamming_f64(size).view())),
+    }
+}
+
 /// Convert a gain in dB into a linear factor (`np.power(sqrt(10), 0.1 * gain)`).
 fn gain_factor(gain_db: f64) -> f64 {
     10f64.powf(gain_db / 20.0)
