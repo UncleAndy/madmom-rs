@@ -60,6 +60,31 @@ by a different madmom run, so bit-equality is not expected; the plan's tolerance
 activations is 1e-4). `sample.features.npy` is additionally identical to the input dumped
 independently by `dump_preproc.py --preproc` (two code paths, same numbers).
 
+## Audio decoding dumps (`io/`)
+
+Produced by `tools/dump_audio.py` from madmom's own `load_wave_file` (scipy's
+`wavfile`), in the file's native dtype:
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_audio.py third_party/madmom"
+```
+
+| case | dtype | shape | rate |
+| --- | --- | --- | --- |
+| `sample.wav` | int16 | (123481,) | 44100 |
+| `sample_22050.wav` | int16 | (61741,) | 22050 |
+| `sample2.wav` | int16 | (178636,) | 44100 |
+| `stereo_sample.wav` | int16 | (182919, 2) | 44100 |
+| `stereo_chirp.wav` | int16 | (22050, 2) | 44100 |
+| `sample.wav` + `start=0.1`, `start=0.1 stop=0.5`, `stop=0.25` | int16 | (119071,) / (17640,) / (11025,) | 44100 |
+| `stereo_sample.wav` + `start=0.2 stop=0.6` | int16 | (17640, 2) | 44100 |
+
+`index.tsv` lists `fixture, start, stop, sample_rate, descr, shape, sha256`;
+`crates/madmom-io/tests/audio_golden.rs` replays every row through the Rust WAV reader
+and requires the format, shape, rate and **all samples** to be identical (verified:
+bit-exact on all nine cases).
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):

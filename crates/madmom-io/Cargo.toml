@@ -8,4 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ndarray.workspace = true
+thiserror.workspace = true
 madmom-core = { path = "../madmom-core" }

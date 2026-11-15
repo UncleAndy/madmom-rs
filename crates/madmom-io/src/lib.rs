@@ -4,4 +4,5 @@
 
 #![deny(missing_docs)]
 
+pub mod audio;
 pub mod npy;
