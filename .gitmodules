@@ -1,6 +1,6 @@
 [submodule "third_party/madmom"]
 	path = third_party/madmom
 	url = git@github.com:CPJKU/madmom.git
-[submodule "third_party/madmom_models"]
-	path = third_party/madmom_models
-	url = git@github.com:CPJKU/madmom_models.git
+[submodule "third_party/tritonserver-rs"]
+	path = third_party/tritonserver-rs
+	url = https://github.com/UncleAndy/tritonserver-rs
