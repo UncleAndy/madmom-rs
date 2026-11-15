@@ -74,12 +74,23 @@ def conv_layer(layer: Any, data: str, name: str, inits: list, nodes: list) -> st
 
 def batch_norm_layer(layer: Any, data: str, name: str, inits: list, nodes: list) -> str:
     """(x - mean) * (gamma * inv_std) + beta, per channel, as scale and shift."""
-    gamma = np.asarray(layer.gamma, np.float32).reshape(-1)
-    beta = np.asarray(layer.beta, np.float32).reshape(-1)
-    mean = np.asarray(layer.mean, np.float32).reshape(-1)
-    inv_std = np.asarray(layer.inv_std, np.float32).reshape(-1)
-    scale = (gamma * inv_std).reshape(1, -1, 1, 1)
-    shift = (beta - mean * gamma * inv_std).reshape(1, -1, 1, 1)
+    # keep the shapes: a 2-D mean/inv_std means the layer normalises over (bins, channels)
+    # rather than per channel, and flattening them first hid that (the check below could
+    # never fire, and onsets_cnn got a (1, 240, 1, 1) scale instead of (1, 3, 1, 80))
+    gamma = np.asarray(layer.gamma, np.float32)
+    beta = np.asarray(layer.beta, np.float32)
+    mean = np.asarray(layer.mean, np.float32)
+    inv_std = np.asarray(layer.inv_std, np.float32)
+    scale = gamma * inv_std
+    shift = beta - mean * gamma * inv_std
+    if mean.ndim == 2:
+        # onsets_cnn normalises over (bins, channels), not per channel: the parameters are
+        # (bins, channels) and map onto an NCHW tensor as (1, channels, 1, bins).
+        scale = np.transpose(scale).reshape(1, scale.shape[1], 1, scale.shape[0])
+        shift = np.transpose(shift).reshape(1, shift.shape[1], 1, shift.shape[0])
+    else:
+        scale = scale.reshape(1, -1, 1, 1)
+        shift = shift.reshape(1, -1, 1, 1)
     inits.append(_init(f"{name}.scale", scale))
     inits.append(_init(f"{name}.shift", shift))
     nodes.append(helper.make_node("Mul", [data, f"{name}.scale"], [f"{name}.scaled"]))
@@ -160,7 +171,9 @@ def stride_layer(layer: Any, data: str, name: str, nodes: list, inits: list) -> 
     nodes.append(helper.make_node("Gather", [f"{name}.shape", "_two_i64"], [f"{name}.frames"], axis=0))
     nodes.append(helper.make_node("Div", [f"{name}.frames", _const(inits, f"{name}.block", np.int64(block))],
                                   [f"{name}.windows"]))
-    nodes.append(helper.make_node("Gather", [f"{name}.shape", "_zero_i64"], [f"{name}.channels"], axis=0))
+    nodes.append(helper.make_node("Gather", [f"{name}.shape", "_zero_i64"], [f"{name}.channels_s"], axis=0))
+    # Concat needs 1-D inputs; a Gather with a scalar index yields a 0-D tensor
+    nodes.append(helper.make_node("Unsqueeze", [f"{name}.channels_s", "_zero_axes"], [f"{name}.channels"]))
     nodes.append(helper.make_node("Gather", [f"{name}.shape", "_three_i64"], [f"{name}.bins"], axis=0))
     nodes.append(helper.make_node("Unsqueeze", [f"{name}.windows", "_zero_axes"], [f"{name}.windows1"]))
     nodes.append(helper.make_node("Unsqueeze", [f"{name}.block", "_zero_axes"], [f"{name}.block1"]))
@@ -237,7 +250,8 @@ def build(model: Any, spec: Any) -> Any:
         numpy_helper.from_array(np.array([-1], dtype=np.int64), "_neg_one_i64"),
         numpy_helper.from_array(np.array([0], dtype=np.int64), "_zero_axes"),
         numpy_helper.from_array(np.array(0, dtype=np.int64), "_zero_i64_scalar"),
-        numpy_helper.from_array(np.array([3], dtype=np.int64), "_three_i64"),
+        numpy_helper.from_array(np.array(3, dtype=np.int64), "_three_i64"),
+        numpy_helper.from_array(np.array(2, dtype=np.int64), "_two_i64"),
     ])
     _pair_dim = int(np.asarray(spec.input_dims[-1]))
     # (frames, bins, channels) -> (1, channels, frames, bins)
