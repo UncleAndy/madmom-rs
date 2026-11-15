@@ -1273,6 +1273,16 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
   (`forward`+`argmax`), `correct=false` (`argrelmin` из scipy), `BeatTrackingProcessor`,
   `BeatDetectionProcessor`, `CRFBeatDetectionProcessor`.
 
+**Статус downbeats (2026-11-15): тоже в golden-режиме, тоже без Triton.** Сделано в
+`crates/madmom-features/src/beats_hmm.rs` (`BarStateSpace` — стопка из `num_beats`
+битовых пространств с накопительными позициями, `BarTransitionModel` — смена темпа
+только на границе доли, `RNNDownBeatTrackingObservationModel` — три колонки
+наблюдений) и `crates/madmom-features/src/downbeats.rs`
+(`DBNDownBeatTrackingProcessor` с константами эталона `NUM_TEMPI=60`, `THRESHOLD=0.05`,
+`OBSERVATION_LAMBDA=16`, `TRANSITION_LAMBDA=100`; строка побеждает по лог-вероятности
+пути). **Не сделано:** `MultiPatternStateSpace`/`MultiPatternTransitionModel`,
+`RNNDownBeatTrackingObservationModel` на нескольких паттернах и CRF-варианты.
+
 Главная сверка (golden-режим: активации из эталонного дампа, сеть не нужна):
 
 ```
@@ -1281,9 +1291,24 @@ log probability: -758.193325 против -758.193326 в дампе
 биения: [0.1, 0.45, 0.8, 1.12, 1.48, 1.8, 2.15, 2.49] — все в пределах 1e-6
 ```
 
+Сверка downbeats на активациях эталона (`sample.downbeats_blstm.npz`, 281 кадр × 2
+колонки):
+
+```
+путь Витерби 3/4: 281 из 281 кадров идентичны, log prob -764.586594
+путь Витерби 4/4: 281 из 281 кадров идентичны, log prob -760.212077   ← победившая строка
+пути после порога 0.05 (строки 7..267): 261 из 261 идентичны
+(down-)beats: [(0.09,1) (0.45,2) (0.79,3) (1.12,4) (1.47,1) (1.8,2) (2.14,3) (2.49,4)]
+```
+
+Две ловушки, которые дамп вскрыл сразу: `np.argmax` по окну из двух колонок —
+**плоский** (строка с меньшей первой колонкой выигрывает второй: 0.08 с вместо 0.09 с),
+а madmom возвращает `np.vstack(...).T`, поэтому `np.save` пишет массив в
+**Fortran-порядке** — читатель `.npy` теперь разворачивает его при чтении.
+
 Это первый сквозной результат: `WAV → кадры → STFT → фильтрбанк → логи-спектр →
-разности → (активации из фикстуры) → DBN → биения`. Осталось подключить саму сеть
-(Фаза 2, Triton на хосте) — и флагманский пайплайн биений будет полным.
+разности → (активации из фикстуры) → DBN → биения / сильные доли`. Осталось подключить
+саму сеть (Фаза 2, Triton на хосте) — и флагманский пайплайн биений будет полным.
 
 
 #### Task 3.1: `ml::hmm`
@@ -1315,13 +1340,14 @@ Test `…/tests/beats_hmm.rs` (порт `tests/test_features_beats_hmm.py`, 17 �
 `RNNDownBeatTrackingObservationModel`, `GMMPatternTrackingObservationModel`,
 `exponential_transition`.
 
-- [ ] Шаг 1 (тест): `BeatStateSpace(40, 400)` — `num_states`, `num_intervals`,
+- [x] Шаг 1 (тест): `BeatStateSpace(40, 400)` — `num_states`, `num_intervals`,
       `first_states`, `last_states`, лог-шкала при `num_intervals < len(linear)`.
-- [ ] Шаг 2 (тест): `exponential_transition` — `np.spacing(1)`-порог,
+- [x] Шаг 2 (тест): `exponential_transition` — `np.spacing(1)`-порог,
       нормировка по строкам, `transition_lambda=None` → диагональная матрица.
-- [ ] Шаг 3 (тест): `BarStateSpace(4, …)` + `MultiPatternStateSpace` — offsets
-      `first_states`/`last_states` совпадают с эталоном.
-- [ ] Шаг 4: коммит `feat(features): beat/downbeat HMM state and observation models`.
+- [x] Шаг 3а (тест): `BarStateSpace(4, …)` — накопительные позиции, offsets
+      `first_states`/`last_states` совпадают с эталоном (Unit-тест на этой стороне).
+- [ ] Шаг 3б: `MultiPatternStateSpace` и `MultiPatternTransitionModel` — не сделано.
+- [x] Шаг 4: коммит `feat(features): beat/downbeat HMM state and observation models`.
 
 #### Task 3.3: Пик-пикинг онсетов
 

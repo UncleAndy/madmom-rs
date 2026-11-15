@@ -285,6 +285,58 @@ impl NpyArray {
         Ok(out)
     }
 
+    /// Reads the array as `f64` values, without the precision loss of [`Self::as_f32`].
+    ///
+    /// Needed for scalars that were written in double precision (log probabilities of a
+    /// decoding, for instance), where `f32` rounding is coarser than the comparison.
+    pub fn as_f64(&self) -> Result<Vec<f64>> {
+        let out = match self.header.dtype {
+            DType::F64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect(),
+            DType::I64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| {
+                    i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f64
+                })
+                .collect(),
+            DType::U64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| {
+                    u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f64
+                })
+                .collect(),
+            DType::C64 | DType::C128 | DType::Object => {
+                return Err(NpyError::UnsupportedDtype(format!(
+                    "{:?} as f64",
+                    self.header.dtype
+                )))
+            }
+            other => self
+                .as_f32_for(other)?
+                .into_iter()
+                .map(|value| value as f64)
+                .collect(),
+        };
+        Ok(out)
+    }
+
+    /// `as_f32` for an explicit dtype (helper so `as_f64` can reuse the narrow types).
+    fn as_f32_for(&self, dtype: DType) -> Result<Vec<f32>> {
+        let clone = NpyArray {
+            header: Header {
+                dtype,
+                ..self.header.clone()
+            },
+            data: self.data.clone(),
+        };
+        clone.as_f32()
+    }
+
     /// Reads a complex array as `Complex32` values.
     ///
     /// The STFT dumps are `complex64` (`<c8`), so this is the dtype the audio stages
@@ -352,7 +404,7 @@ pub fn read_npy<P: AsRef<Path>>(path: P) -> Result<NpyArray> {
 
 /// Parses an in-memory `.npy` buffer.
 pub fn parse_npy(bytes: &[u8]) -> Result<NpyArray> {
-    let header = parse_header(bytes)?;
+    let mut header = parse_header(bytes)?;
     let start = header.data_offset;
     let len = header.data_len();
     let end = start
@@ -364,10 +416,54 @@ pub fn parse_npy(bytes: &[u8]) -> Result<NpyArray> {
             have: bytes.len(),
         });
     }
-    Ok(NpyArray {
-        header,
-        data: bytes[start..end].to_vec(),
-    })
+    let data = c_order_data(&header, &bytes[start..end])?;
+    // the values are handed out in C order from here on
+    header.fortran_order = false;
+    Ok(NpyArray { header, data })
+}
+
+/// Reorders a Fortran-ordered array into C order.
+///
+/// `np.save` writes a transposed view (which is what madmom's processors return) with
+/// `fortran_order: True`, so the raw bytes are column-major. Readers that ignore the flag
+/// silently hand out a transposed array, which is exactly the kind of silent mismatch the
+/// golden dumps are supposed to catch: the first (down-)beat then took its time from the
+/// correct row but its beat number from the wrong column.
+fn c_order_data(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
+    let shape = &header.shape;
+    if !header.fortran_order || shape.len() < 2 {
+        return Ok(data.to_vec());
+    }
+    let itemsize = header.dtype.size_in_bytes();
+    let total: usize = shape.iter().product();
+    if data.len() < total * itemsize {
+        return Err(NpyError::BufferTooShort {
+            need: total * itemsize,
+            have: data.len(),
+        });
+    }
+    // Fortran strides in elements: first axis varies fastest
+    let mut fortran_strides = vec![1usize; shape.len()];
+    for axis in 1..shape.len() {
+        fortran_strides[axis] = fortran_strides[axis - 1] * shape[axis - 1];
+    }
+    let mut out = vec![0u8; total * itemsize];
+    let mut index = vec![0usize; shape.len()];
+    for c_index in 0..total {
+        let mut remainder = c_index;
+        for axis in (0..shape.len()).rev() {
+            index[axis] = remainder % shape[axis];
+            remainder /= shape[axis];
+        }
+        let f_index: usize = index
+            .iter()
+            .zip(fortran_strides.iter())
+            .map(|(position, stride)| position * stride)
+            .sum();
+        out[c_index * itemsize..(c_index + 1) * itemsize]
+            .copy_from_slice(&data[f_index * itemsize..(f_index + 1) * itemsize]);
+    }
+    Ok(out)
 }
 
 /// Parses the `.npy` magic, version and header dictionary.
@@ -643,8 +739,14 @@ mod tests {
 
     /// Minimal in-memory `.npy` container, used where madmom has no stored fixture.
     fn npy_bytes(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
-        let mut header =
-            format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
+        npy_bytes_ordered(descr, shape, data, false)
+    }
+
+    fn npy_bytes_ordered(descr: &str, shape: &str, data: &[u8], fortran: bool) -> Vec<u8> {
+        let mut header = format!(
+            "{{'descr': '{descr}', 'fortran_order': {}, 'shape': {shape}, }}",
+            if fortran { "True" } else { "False" }
+        );
         let padding = 64 - ((10 + header.len() + 1) % 64);
         header.push_str(&" ".repeat(if padding == 64 { 0 } else { padding }));
         header.push('\n');
@@ -653,6 +755,30 @@ mod tests {
         out.extend_from_slice(header.as_bytes());
         out.extend_from_slice(data);
         out
+    }
+
+    #[test]
+    fn reads_fortran_ordered_arrays_in_c_order() {
+        // numpy stores a transposed view (madmom's processors end with `.T`) column-major;
+        // the flag must be honoured or every consumer sees a transposed array
+        let values: [f64; 6] = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]; // F order of [[1,2,3],[4,5,6]]
+        let mut data = Vec::new();
+        for value in values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let bytes = npy_bytes_ordered("<f8", "(2, 3)", &data, true);
+        let array = parse_npy(&bytes).expect("fortran ordered buffer");
+        assert_eq!(array.shape(), &[2, 3]);
+        assert!(!array.header.fortran_order, "the flag is resolved on read");
+        let values = array.as_f32().expect("numeric");
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        // a Fortran-ordered buffer must read like the same data in C order
+        let mut c_data = Vec::new();
+        for value in [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            c_data.extend_from_slice(&value.to_le_bytes());
+        }
+        let c_order = parse_npy(&npy_bytes("<f8", "(2, 3)", &c_data)).expect("c ordered buffer");
+        assert_eq!(values, c_order.as_f32().expect("numeric"));
     }
 
     #[test]

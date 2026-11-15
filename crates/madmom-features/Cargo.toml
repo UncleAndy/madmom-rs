@@ -17,3 +17,4 @@ thiserror.workspace = true
 [dev-dependencies]
 # the golden tests read NumPy dumps
 madmom-io = { path = "../madmom-io" }
+madmom-testkit = { path = "../madmom-testkit" }

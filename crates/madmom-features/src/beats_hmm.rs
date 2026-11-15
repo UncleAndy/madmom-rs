@@ -18,7 +18,7 @@
 //!   the beat column (1) and the rest to the no-beat column (0).
 
 use madmom_ml::hmm::{ObservationModel, TransitionModel};
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Exponent of the threshold below which tempo transitions are dropped
 /// (`np.spacing(1)`, the smallest representable step above 1).
@@ -293,12 +293,240 @@ impl ObservationModel for RNNBeatTrackingObservationModel {
         &self.pointers
     }
 
-    fn log_densities(&self, observations: ArrayView1<'_, f64>) -> Array2<f64> {
-        let mut densities = Array2::<f64>::zeros((observations.len(), 2));
+    fn log_densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64> {
+        let mut densities = Array2::<f64>::zeros((observations.shape()[0], 2));
         let lambda = self.observation_lambda;
-        for (frame, observation) in observations.iter().enumerate() {
+        for (frame, row) in observations.rows().into_iter().enumerate() {
+            let observation = row[0];
             densities[[frame, 0]] = ((1.0 - observation) / (lambda - 1.0)).ln();
             densities[[frame, 1]] = observation.ln();
+        }
+        densities
+    }
+}
+
+/// State space for bar tracking: a [`BeatStateSpace`] stacked `num_beats` times.
+///
+/// Positions are **cumulative** across the bar (`beat + position within the beat`), which
+/// is what lets the downbeat observation model find the first beat with `position < 1 /
+/// observation_lambda` and the beat states with `position % 1 < 1 / observation_lambda`.
+#[derive(Debug, Clone)]
+pub struct BarStateSpace {
+    num_beats: usize,
+    num_states: usize,
+    state_positions: Array1<f64>,
+    state_intervals: Vec<usize>,
+    first_states: Vec<Vec<usize>>,
+    last_states: Vec<Vec<usize>>,
+}
+
+impl BarStateSpace {
+    /// Stack `num_beats` copies of the beat state space.
+    pub fn new(
+        num_beats: usize,
+        min_interval: f64,
+        max_interval: f64,
+        num_intervals: Option<usize>,
+    ) -> Self {
+        let beat = BeatStateSpace::new(min_interval, max_interval, num_intervals);
+        let mut state_positions = Array1::<f64>::zeros(beat.num_states() * num_beats);
+        let mut state_intervals = Vec::with_capacity(beat.num_states() * num_beats);
+        let mut first_states = Vec::with_capacity(num_beats);
+        let mut last_states = Vec::with_capacity(num_beats);
+        let mut offset = 0usize;
+        for beat_index in 0..num_beats {
+            for (position, value) in beat.state_positions().iter().enumerate() {
+                state_positions[offset + position] = *value + beat_index as f64;
+            }
+            state_intervals.extend_from_slice(beat.state_intervals());
+            first_states.push(
+                beat.first_states()
+                    .iter()
+                    .map(|state| state + offset)
+                    .collect(),
+            );
+            last_states.push(
+                beat.last_states()
+                    .iter()
+                    .map(|state| state + offset)
+                    .collect(),
+            );
+            offset += beat.num_states();
+        }
+        Self {
+            num_beats,
+            num_states: offset,
+            state_positions,
+            state_intervals,
+            first_states,
+            last_states,
+        }
+    }
+
+    /// Number of beats in a bar.
+    pub fn num_beats(&self) -> usize {
+        self.num_beats
+    }
+
+    /// Number of states of the whole bar.
+    pub fn num_states(&self) -> usize {
+        self.num_states
+    }
+
+    /// Cumulative positions of the states.
+    pub fn state_positions(&self) -> ArrayView1<'_, f64> {
+        self.state_positions.view()
+    }
+
+    /// Interval that each state belongs to.
+    pub fn state_intervals(&self) -> &[usize] {
+        &self.state_intervals
+    }
+
+    /// First states of every beat.
+    pub fn first_states(&self) -> &[Vec<usize>] {
+        &self.first_states
+    }
+
+    /// Last states of every beat.
+    pub fn last_states(&self) -> &[Vec<usize>] {
+        &self.last_states
+    }
+}
+
+/// Transition model of the bar DBN.
+///
+/// Inside a beat the tempo cannot change (probability 1 between neighbouring states);
+/// at a beat boundary the tempo may change according to its own exponential lambda —
+/// `None` for that beat freezes the tempo there.
+#[derive(Debug, Clone)]
+pub struct BarTransitionModel {
+    state_space: BarStateSpace,
+    transition_lambda: Vec<Option<f64>>,
+    transition_model: TransitionModel,
+}
+
+impl BarTransitionModel {
+    /// Build the transition model; one lambda per beat.
+    pub fn new(state_space: BarStateSpace, transition_lambda: Vec<Option<f64>>) -> Self {
+        assert_eq!(
+            state_space.num_beats(),
+            transition_lambda.len(),
+            "one lambda per beat is required"
+        );
+        let first_states: Vec<usize> = state_space
+            .first_states()
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let mut states: Vec<u32> = (0..state_space.num_states() as u32)
+            .filter(|state| !first_states.contains(&(*state as usize)))
+            .collect();
+        let mut prev_states: Vec<u32> = states.iter().map(|state| state - 1).collect();
+        let mut probabilities: Vec<f64> = vec![1.0; states.len()];
+        // tempo transitions at the beat boundaries; beat 0 is fed from the last beat of
+        // the previous bar (Python's negative index)
+        for (beat, &beat_lambda) in transition_lambda.iter().enumerate() {
+            let previous_beat = (beat + state_space.num_beats() - 1) % state_space.num_beats();
+            let to_states = &state_space.first_states()[beat];
+            let from_states = &state_space.last_states()[previous_beat];
+            let from_intervals: Vec<usize> = from_states
+                .iter()
+                .map(|state| state_space.state_intervals()[*state])
+                .collect();
+            let to_intervals: Vec<usize> = to_states
+                .iter()
+                .map(|state| state_space.state_intervals()[*state])
+                .collect();
+            let prob = exponential_transition(&from_intervals, &to_intervals, beat_lambda);
+            for row in 0..prob.shape()[0] {
+                for column in 0..prob.shape()[1] {
+                    let probability = prob[[row, column]];
+                    if probability != 0.0 {
+                        states.push(to_states[column] as u32);
+                        prev_states.push(from_states[row] as u32);
+                        probabilities.push(probability);
+                    }
+                }
+            }
+        }
+        let transition_model = TransitionModel::make_sparse(&states, &prev_states, &probabilities)
+            .expect("the bar transition model must be a distribution");
+        Self {
+            state_space,
+            transition_lambda,
+            transition_model,
+        }
+    }
+
+    /// The state space.
+    pub fn state_space(&self) -> &BarStateSpace {
+        &self.state_space
+    }
+
+    /// The lambda of every beat.
+    pub fn transition_lambda(&self) -> &[Option<f64>] {
+        &self.transition_lambda
+    }
+
+    /// The sparse transition model.
+    pub fn transition_model(&self) -> &TransitionModel {
+        &self.transition_model
+    }
+
+    /// The transition model by value (it is handed to the HMM).
+    pub fn into_transition_model(self) -> TransitionModel {
+        self.transition_model
+    }
+}
+
+/// Observation model of the downbeat DBN: no-beat, beat and downbeat columns.
+#[derive(Debug, Clone)]
+pub struct RNNDownBeatTrackingObservationModel {
+    observation_lambda: f64,
+    pointers: Vec<u32>,
+}
+
+impl RNNDownBeatTrackingObservationModel {
+    /// Build the model: beat states point to column 1, the downbeat states to column 2.
+    pub fn new(state_space: &BarStateSpace, observation_lambda: f64) -> Self {
+        let border = 1.0 / observation_lambda;
+        let mut pointers = vec![0u32; state_space.num_states()];
+        for (state, position) in state_space.state_positions().iter().enumerate() {
+            if position % 1.0 < border {
+                pointers[state] = 1;
+            }
+            if *position < border {
+                pointers[state] = 2;
+            }
+        }
+        Self {
+            observation_lambda,
+            pointers,
+        }
+    }
+
+    /// The observation lambda.
+    pub fn observation_lambda(&self) -> f64 {
+        self.observation_lambda
+    }
+}
+
+impl ObservationModel for RNNDownBeatTrackingObservationModel {
+    fn pointers(&self) -> &[u32] {
+        &self.pointers
+    }
+
+    /// Two observation columns in (beat, downbeat), three densities out.
+    fn log_densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64> {
+        let mut densities = Array2::<f64>::zeros((observations.shape()[0], 3));
+        let lambda = self.observation_lambda;
+        for (frame, row) in observations.rows().into_iter().enumerate() {
+            let (beat, downbeat) = (row[0], row[1]);
+            densities[[frame, 0]] = ((1.0 - (beat + downbeat)) / (lambda - 1.0)).ln();
+            densities[[frame, 1]] = beat.ln();
+            densities[[frame, 2]] = downbeat.ln();
         }
         densities
     }
@@ -355,12 +583,53 @@ mod tests {
     }
 
     #[test]
+    fn bar_state_space_stacks_the_beat_space() {
+        // 2 beats, intervals 2..=4 -> 2 * 9 states, positions run 0..2
+        let bar = BarStateSpace::new(2, 2.0, 4.0, None);
+        assert_eq!(bar.num_beats(), 2);
+        assert_eq!(bar.num_states(), 18);
+        assert_eq!(bar.first_states()[0], vec![0, 2, 5]);
+        assert_eq!(bar.first_states()[1], vec![9, 11, 14]);
+        assert_eq!(bar.last_states()[1], vec![10, 13, 17]);
+        // the first state of the second beat sits at position 1.0
+        assert!((bar.state_positions()[9] - 1.0).abs() < 1e-12);
+        assert!((bar.state_positions()[17] - 1.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn downbeat_pointers_mark_the_first_beat() {
+        let bar = BarStateSpace::new(2, 4.0, 4.0, None);
+        // lambda 4 -> border 0.25: positions < 0.25 are beat states, < 0.25 in the bar
+        // are downbeat states; position 1.0 belongs to beat 2, so it is a beat, not a
+        // downbeat
+        let model = RNNDownBeatTrackingObservationModel::new(&bar, 4.0);
+        assert_eq!(model.pointers(), &[2, 0, 0, 0, 1, 0, 0, 0]);
+        let densities = model.log_densities(ndarray::array![[0.4f64, 0.2]].view());
+        assert!((densities[[0, 1]] - 0.4f64.ln()).abs() < 1e-12);
+        assert!((densities[[0, 2]] - 0.2f64.ln()).abs() < 1e-12);
+        assert!((densities[[0, 0]] - ((1.0 - 0.6) / 3.0f64).ln()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bar_transitions_allow_tempo_changes_only_at_beat_boundaries() {
+        let bar = BarStateSpace::new(2, 4.0, 6.0, None);
+        let model = BarTransitionModel::new(bar, vec![Some(100.0), None]);
+        let transition_model = model.transition_model();
+        // inside a beat: probability 1 from the predecessor (up to exp(ln(1)) rounding)
+        assert!((transition_model.log_probabilities()[0].exp() - 1.0).abs() < 1e-9);
+        // a lambda of None freezes the tempo at that boundary: the transitions into the
+        // first states of beat 2 are still there (they come from the previous bar), but
+        // they are diagonal-only, i.e. the interval cannot change
+        assert!(transition_model.num_transitions() > 0);
+    }
+
+    #[test]
     fn observation_pointers_split_the_beat_period() {
         let state_space = BeatStateSpace::new(4.0, 4.0, None);
         // lambda 4 -> positions < 0.25 are beat states, i.e. only position 0
         let model = RNNBeatTrackingObservationModel::new(&state_space, 4.0);
         assert_eq!(model.pointers(), &[1, 0, 0, 0]);
-        let densities = model.log_densities(ndarray::array![0.5f64].view());
+        let densities = model.log_densities(ndarray::array![[0.5f64]].view());
         assert!((densities[[0, 1]] - 0.5f64.ln()).abs() < 1e-12);
         assert!((densities[[0, 0]] - ((1.0 - 0.5) / 3.0f64).ln()).abs() < 1e-12);
     }

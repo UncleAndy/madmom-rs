@@ -57,6 +57,7 @@ dependencies = [
  "madmom-core",
  "madmom-io",
  "madmom-ml",
+ "madmom-testkit",
  "ndarray",
  "thiserror",
 ]

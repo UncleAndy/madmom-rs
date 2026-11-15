@@ -13,7 +13,7 @@
 //! warns and returns it, the caller has to check), and the backtracking pointers of the
 //! first frame are never used.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView2};
 use thiserror::Error;
 
 /// Errors of the HMM stage.
@@ -174,7 +174,10 @@ pub trait ObservationModel {
     fn pointers(&self) -> &[u32];
 
     /// Log densities, `(num_observations, num_columns)`.
-    fn log_densities(&self, observations: ArrayView1<'_, f64>) -> Array2<f64>;
+    ///
+    /// Observations are 2-D: the beat models use a single column, the downbeat models
+    /// two (beat and downbeat activations), exactly as the reference passes them.
+    fn log_densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64>;
 }
 
 /// A discrete observation model: a `(num_states, num_observations)` probability table.
@@ -211,12 +214,12 @@ impl ObservationModel for DiscreteObservationModel {
     }
 
     /// Densities of the observations, `observation_probabilities[:, observations].T`.
-    fn log_densities(&self, observations: ArrayView1<'_, f64>) -> Array2<f64> {
+    fn log_densities(&self, observations: ArrayView2<'_, f64>) -> Array2<f64> {
         let num_states = self.observation_probabilities.shape()[0];
         let num_observations = self.observation_probabilities.shape()[1];
         let mut out = Array2::<f64>::zeros((observations.len(), num_states));
-        for (frame, value) in observations.iter().enumerate() {
-            let observation = *value as usize;
+        for (frame, row) in observations.rows().into_iter().enumerate() {
+            let observation = row[0] as usize;
             assert!(
                 observation < num_observations,
                 "observation {observation} is outside the model's {num_observations} values"
@@ -293,9 +296,9 @@ impl<O: ObservationModel> HiddenMarkovModel<O> {
     /// Mirrors `HiddenMarkovModel.viterbi`: log domain, sparse predecessor iteration,
     /// first maximum wins on ties, and a `-inf` result returns an empty path (the
     /// reference emits a warning there; the empty path is the contract callers rely on).
-    pub fn viterbi(&self, observations: ArrayView1<'_, f64>) -> ViterbiResult {
+    pub fn viterbi(&self, observations: ArrayView2<'_, f64>) -> ViterbiResult {
         let num_states = self.transition_model.num_states();
-        let num_observations = observations.len();
+        let num_observations = observations.shape()[0];
         let densities = self.observation_model.log_densities(observations);
         let pointers = self.observation_model.pointers();
         // ln(initial distribution) as the previous Viterbi variables
@@ -378,7 +381,20 @@ mod tests {
         let observations = DiscreteObservationModel::new(array![[0.2, 0.3, 0.5], [0.7, 0.1, 0.2]])
             .expect("distribution");
         let hmm = HiddenMarkovModel::new(transitions, observations, None).expect("uniform prior");
-        let result = hmm.viterbi(array![0.0f64, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 2.0, 2.0].view());
+        let result = hmm.viterbi(
+            array![
+                [0.0f64],
+                [0.0],
+                [1.0],
+                [1.0],
+                [0.0],
+                [0.0],
+                [0.0],
+                [2.0],
+                [2.0]
+            ]
+            .view(),
+        );
         assert_eq!(result.path, vec![1, 1, 0, 0, 1, 1, 1, 0, 0]);
         // the doctest prints -12.87... (ellipsis, so the tail is not pinned there)
         assert!(
@@ -392,7 +408,7 @@ mod tests {
     fn viterbi_follows_the_observations() {
         let hmm = two_state_hmm();
         // observations 0, 0, 1, 1 select state 0 and then state 1
-        let result = hmm.viterbi(array![0.0f64, 0.0, 1.0, 1.0].view());
+        let result = hmm.viterbi(array![[0.0f64], [0.0], [1.0], [1.0]].view());
         assert_eq!(result.path, vec![0, 0, 1, 1]);
         assert!(result.log_probability.is_finite());
     }
@@ -400,7 +416,7 @@ mod tests {
     #[test]
     fn viterbi_reports_the_log_probability_of_the_path() {
         let hmm = two_state_hmm();
-        let result = hmm.viterbi(array![0.0f64].view());
+        let result = hmm.viterbi(array![[0.0f64]].view());
         // ln(1/2) + ln(0.9) + ln(0.9) for state 0 (transition from the prior)
         let expected = (0.5f64).ln() + (0.9f64).ln() + (0.9f64).ln();
         assert!((result.log_probability - expected).abs() < 1e-9);
@@ -412,7 +428,7 @@ mod tests {
         // density 0 -> log density -inf -> no valid path
         let observations = DiscreteObservationModel::new(array![[1.0f64, 0.0]]).unwrap();
         let hmm = HiddenMarkovModel::new(transitions, observations, None).unwrap();
-        let result = hmm.viterbi(array![1.0f64].view());
+        let result = hmm.viterbi(array![[1.0f64]].view());
         assert!(result.path.is_empty());
         assert!(result.log_probability.is_infinite());
     }

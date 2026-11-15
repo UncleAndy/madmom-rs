@@ -10,7 +10,7 @@
 //! `observation_lambda` 16, threshold 0, `correct` on.
 
 use madmom_ml::hmm::{HiddenMarkovModel, ObservationModel, ViterbiResult};
-use ndarray::Array1;
+use ndarray::Array2;
 
 use crate::beats_hmm::{BeatStateSpace, BeatTransitionModel, RNNBeatTrackingObservationModel};
 
@@ -143,8 +143,13 @@ impl DBNBeatTrackingProcessor {
     }
 
     /// Decode the state path of the activations (no thresholding).
+    ///
+    /// The beat observation model takes one value per frame, so the activations are
+    /// passed as a single-column matrix.
     pub fn viterbi_path(&self, activations: &[f64]) -> ViterbiResult {
-        self.hmm.viterbi(Array1::from(activations.to_vec()).view())
+        let matrix = Array2::from_shape_vec((activations.len(), 1), activations.to_vec())
+            .expect("one column holds all activations");
+        self.hmm.viterbi(matrix.view())
     }
 
     /// Detect beat positions [seconds] from beat activations.

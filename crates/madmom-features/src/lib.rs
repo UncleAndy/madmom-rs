@@ -6,3 +6,4 @@
 
 pub mod beats;
 pub mod beats_hmm;
+pub mod downbeats;

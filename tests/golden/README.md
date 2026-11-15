@@ -126,6 +126,38 @@ is the float32 normalization sum being added up in a different order than NumPy'
 pairwise sum. The dumps already caught one transcription error in this port (the double
 Bark table had 60 Hz where madmom has 50 Hz).
 
+## Joint beat/downbeat DBN (`downbeats/`)
+
+Produced by `tools/dump_downbeats.py`. The input is **not** audio but the reference's own
+network output, `tests/data/activations/sample.downbeats_blstm.npz` (281 frames at
+100 fps, two columns: beat and downbeat), so the DBN is pinned without needing Triton:
+
+```bash
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy ps.mido])' \
+  --run "python3 tools/dump_downbeats.py third_party/madmom"
+```
+
+Cases: `result.npy` (the 8 (down-)beats with their beat number, what the processor
+returns), `trimmed.npy` (the activations after the 0.05 threshold — rows 7..267 of 281),
+`path_{3,4}.npy`/`logprob_{3,4}.npy` (Viterbi path and log probability of each modelled
+bar length on the untrimmed activations) and
+`path_trimmed_{3,4}.npy`/`logprob_trimmed_{3,4}.npy` (the same on the trimmed ones, which
+is what the processor actually decodes).
+
+`crates/madmom-features/tests/downbeats_golden.rs` requires the same state paths (281 of
+281 and 261 of 261 frames, exact integers), the same log probabilities
+(-764.586594 for 3/4 and -760.212077 for 4/4) and the same beats —
+`[(0.09, 1), (0.45, 2), (0.79, 3), (1.12, 4), (1.47, 1), (1.8, 2), (2.14, 3), (2.49, 4)]`.
+
+Two traps this dump already paid for:
+
+* `np.argmax` over the two-column activation window is a **flat** argmax — a later row wins
+  on its downbeat column even when its beat column is smaller. Comparing the rows
+  lexicographically gave 0.08 s instead of 0.09 s for the first beat.
+* madmom returns `np.vstack(...).T`, so `np.save` writes the array **Fortran-ordered**
+  (`fortran_order: True`). A reader that ignores the flag hands out a transposed array;
+  `madmom-io` now reorders on read (`reads_fortran_ordered_arrays_in_c_order`).
+
 ## Verified framing rule
 
 `FramedSignal` (defaults `END_OF_SIGNAL='normal'`, `origin='center'`):
