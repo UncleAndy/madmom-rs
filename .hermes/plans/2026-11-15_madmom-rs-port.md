@@ -348,12 +348,29 @@ third_party/madmom-models-onnx/          # отдельный репозитор
 |---|---|---|
 | `FeedForwardLayer` | `MatMul` + `Add` (+ активация) | — |
 | `RecurrentLayer` | развёртка по кадрам или `Loop` | состояние `_prev`/`init` — начальное состояние в графе |
-| `LSTMLayer` (4× `Gate`/`Cell`, peephole) | `LSTM` (`P` = peephole, `W/R/B` — конкатенация 4 гейтов) | порядок гейтов в ONNX — **i, o, f, c**, у madmom — input/forget/cell/output: нужна перестановка строк |
+| `LSTMLayer` (4× `Gate`/`Cell`, **пипхолы**) | **не `LSTM`**: `MatMul`/`Add`/`Sigmoid`/`Tanh`/`Mul` с явной рекуррентностью | порядок гейтов ONNX — **i, o, f, c**, у madmom — input/forget/cell/output; пипхолы (`P`) в ORT не работают — см. блок ниже |
 | `GRULayer` (`GRUCell`) | `GRU` (`linear_before_reset=1`) | madmom `out = ug*cell + (1-ug)*prev`, ONNX `H = (1-z)*h + z*H_prev` → гейт **инвертирован**; сверить по дампу |
 | `BidirectionalLayer` | два направления + `Concat` | порядок конкатенации fwd/bwd |
 | `ConvolutionalLayer` | `Pad` (constant) + `Conv` | обрезка полей по `_kernel_margins` (чётные ядра сдвигаются); madmom считает в (time, freq, chan), ONNX `Conv` — (N, C, H, W) → `Transpose` вокруг |
 | `MaxPoolLayer` | `MaxPool` + срезы `[size//2 : n-(size-1)//2 : stride]` | та же семантика срезов, `mode='constant'` |
 | `BatchNormLayer` | `Mul` + `Add` (инференс: `(x-mean)*(gamma*inv_std)+beta`) | — |
+
+**ЛОВУШКА (измерено 2026-11-15, меняет предпосылку выше): пипхолы в LSTM/BLSTM.**
+
+- у `blstm` (24 файла) максимум |p| = **35.1**, у `lstm` (8 файлов) — **2.80**;
+  пипхолов нет у 60 моделей (`brnn` 17, `bgru` 12, `cnn` 10, `tcn` 8, `rnn` 8, `crf` 2,
+  `gmm` 2, `feedforward` 1) — там `GRU`/`RNN`-узлы остаются законными;
+- ONNX даёт у `LSTM` необязательный вход `P`, но **onnxruntime его не реализует**: узел с `P`
+  не грузится (`INVALID_GRAPH: Type Error: Type 'tensor(float)' of input parameter (P) ... invalid`),
+  а тот же узел без `P` считается. Опыт поставлен на onnxruntime 1.24.4, оба варианта;
+- значит `LSTM`-узлом эти 32 модели выразить нельзя: молча выброшенные пипхолы дают модель,
+  которая **считается и врёт** — именно тот отказ, который проект запрещает. Рекуррентность
+  (i/f/o с `+p⊙c`, `g = tanh`, `c' = f⊙c + i⊙g`, `h' = o⊙tanh(c')`) разворачивается
+  примитивами; `tools/onnx_spec.py::_lstm_gate_pack`/`_lstm_peepholes` уже готовят тензоры
+  (порядок i,o,f,c и пипхолы в порядке ONNX), нужен сам граф;
+- старая реализация `build_lstm` вдобавок паковала узлы неверно (`B` попадал в слот `P`,
+  смещения гейтов обнулялись) — теперь она **отказывается** строить граф (`UnsupportedLayer`
+  с причиной), вместо того чтобы выдать неправильную модель.
 | `PadLayer`/`TransposeLayer`/`ReshapeLayer`/`AverageLayer` | `Pad`/`Transpose`/`Reshape`/`ReduceMean` | `keepdims`, порядок осей |
 | `MultiTaskLayer`/`SequentialLayer`/`ParallelLayer` | структура графа (разные входы/выходы) | выбор выхода (`itemgetter(0)`) остаётся в Rust |
 | `TCNBlock`/`TCNLayer` | `Conv` с `dilations`, нулевой `Pad` `2*dilation_rate`, `Add` (residual), `Concat` (skip) | дилатация у madmom сделана через `as_strided` — сверить с `Conv(dilations=…)` |
@@ -635,6 +652,25 @@ cargo fmt --all --check                    # чисто
 - `Cargo.lock` закоммичен (сборка с бинарями — лок должен быть в репозитории).
 
 Появившийся `flake.lock` означает, что `nix develop` на хосте вычисляется успешно.
+
+**Состояние конвертера и приёмки ONNX (Task 0.8, прогнано здесь):**
+
+- `tools/convert_to_onnx.py --validate --report` по всем 92 моделям: `converted=1`
+  (`chroma_dnn`, feedforward, `onnx.checker` проходит), `unsupported=91` — это честный
+  список задач Фазы 2, а не пропуск: `rnn`/`brnn`/`gru`/`bgru` (49) ждут билдеров
+  рекуррентных узлов, `lstm`/`blstm` (32) — примитивной рекуррентности с пипхолами,
+  `cnn` (10)/`tcn` (8)/`crf` (2)/`gmm` (2) — своих билдеров (Фазы 4–5);
+- `tools/validate_onnx.py` — численная сверка ONNX против эталона: вход берётся из
+  `dump_preproc.py` (`tests/golden/preproc/*.npy` — то, что получает сеть), выход — из
+  `tests/golden/activations/*.npy`, допуски §4.2 (|Δ| ≤ 1e-4, косинус ≥ 0.999), код возврата
+  ненулевой при расхождении. Инструмент готов, применить его сейчас нельзя: модели-цели
+  (LSTM/BLSTM) пока не конвертируются;
+- `tools/tests/test_convert.py` с пакетом `onnx` (в nixpkgs есть, 1.21.0): **6 passed** —
+  `onnx.checker` проходит на построенном графе `chroma_dnn`;
+- измеренная ширина входа сетей: offline-цепочка биений — 90 (2×45), онлайн
+  (`RNNBeatProcessor(online=True)`, `beats_lstm`) — **162** при 12 бэндах 30…17000 Гц,
+  `log10`, `SpectrogramDifferenceProcessor(diff_ratio=0.5)`. Разложение 162 по стадиям —
+  работа Фазы 1 (промежуточные объекты madmom ленивые, форму нужно измерять по стадиям).
 
 
 #### Task 0.0: Сабмодули (иначе нечего собирать)

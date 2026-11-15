@@ -400,44 +400,40 @@ def _lstm_gate_pack(layer: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 def build_lstm(layer: Any, input_width: int, spec: ModelSpec, *, name: str = "lstm",
                bidirectional: bool = False, reverse_layer: Any = None) -> Any:
-    """Single ONNX LSTM node (optionally bidirectional) for a madmom LSTMLayer."""
-    onnx, helper, numpy_helper = _require_onnx()
-    if bidirectional:
-        fwd = _lstm_gate_pack(layer)
-        bwd = _lstm_gate_pack(reverse_layer)
-        w = np.concatenate([fwd[0], bwd[0]], axis=0)
-        r = np.concatenate([fwd[1], bwd[1]], axis=0)
-        b = np.concatenate([np.concatenate([fwd[2], np.zeros_like(fwd[2])]),
-                            np.concatenate([np.zeros_like(bwd[2]), bwd[2]])])
-        peepholes = _lstm_peepholes(reverse_layer, bidirectional=True, forward=layer)
-        direction = "bidirectional"
-        hidden = bwd[1].shape[0]
-    else:
-        w, r, b = _lstm_gate_pack(layer)
-        peepholes = _lstm_peepholes(layer)
-        direction = "forward"
-        hidden = r.shape[0]
-    initializers = [
-        numpy_helper.from_array(w, name + ".W"),
-        numpy_helper.from_array(r, name + ".R"),
-        numpy_helper.from_array(np.zeros((8 * hidden,), dtype=np.float32), name + ".B"),
-    ]
-    inputs = [spec.input_name, name + ".W", name + ".R"]
-    if peepholes is not None:
-        initializers.append(numpy_helper.from_array(peepholes, name + ".P"))
-        inputs.append(name + ".P")
-    else:
-        inputs.append("")
-    inputs += [name + ".B", "", ""]
-    nodes = [helper.make_node("LSTM", inputs, [name + ".Y", name + ".Y_h", name + ".Y_c"],
-                              hidden_size=hidden, direction=direction)]
-    nodes.append(helper.make_node("Reshape",
-                                  [name + ".Y", "shape.flat"],
-                                  [spec.output_names[0]]))
-    flat = np.array([-1, hidden * (2 if bidirectional else 1)], dtype=np.int64)
-    initializers.append(numpy_helper.from_array(flat, "shape.flat"))
-    return _finish_graph(helper, onnx, nodes, initializers, spec,
-                         hidden * (2 if bidirectional else 1))
+    """Refuse to emit a plain ONNX LSTM node for a madmom `LSTMLayer`.
+
+    madmom's LSTM gates carry **peephole** connections (the previous cell state,
+    weighted per gate), and every LSTM/BLSTM model in madmom_models uses them:
+    measured over the 92 model files, all 24 `blstm` (max |p| = 35.1) and all 8
+    `lstm` (max |p| = 2.80) have non-zero peepholes.
+
+    ONNX gives the LSTM operator an optional `P` (peephole) input, but
+    onnxruntime does not implement it: a node with `P` fails to load with
+    `INVALID_GRAPH: Type Error: Type 'tensor(float)' of input parameter (P) ...
+    invalid`, while the identical node without `P` runs — both checked against
+    onnxruntime 1.24.4. Emitting the node anyway would silently drop the
+    peepholes and yield a model that runs and returns wrong numbers, which is the
+    one failure mode this project refuses. The recurrence has to be spelled out
+    with primitive ops (MatMul/Add/Sigmoid/Tanh/Mul, plus a Slice for the
+    per-gate split) in plan task 2.3; `_lstm_gate_pack` and `_lstm_peepholes`
+    below already produce the tensors that builder needs.
+
+    The previous implementation of this function also mis-packed the node inputs
+    (it passed `B` in the peephole slot and zeroed madmom's gate biases), so the
+    numbers were wrong even before the peephole question.
+    """
+    peepholes = (_lstm_peepholes(reverse_layer, bidirectional=True, forward=layer)
+                 if bidirectional else _lstm_peepholes(layer))
+    magnitude = 0.0 if peepholes is None else float(np.abs(peepholes).max())
+    if magnitude == 0.0:
+        raise UnsupportedLayer(
+            "%s: the ONNX LSTM node path was abandoned (see build_lstm's "
+            "docstring); use the primitive-op recurrence of plan task 2.3" % name)
+    raise UnsupportedLayer(
+        "%s: peephole weights (max |p| = %.4g) cannot be expressed as an ONNX LSTM "
+        "node - onnxruntime rejects the optional P input, and dropping them would "
+        "silently change the numbers; build the recurrence from primitive ops in "
+        "plan task 2.3" % (name, magnitude))
 
 
 def _lstm_peepholes(layer: Any, *, bidirectional: bool = False, forward: Any = None) -> Any:

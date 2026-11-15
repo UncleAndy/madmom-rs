@@ -107,7 +107,6 @@ def test_lstm_gate_order_is_i_o_f_c():
 
 def test_graph_building_needs_onnx_and_validates():
     onnx = pytest.importorskip("onnx", reason="onnx package is needed to build graphs")
-    del onnx
     model = onnx_spec.load_model(MODELS / "chroma" / "2016" / "chroma_dnn.pkl")
     spec = onnx_spec.spec_for("chroma_dnn.pkl", family="feedforward")
     graph = onnx_spec.build_model(model, spec)

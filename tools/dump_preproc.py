@@ -122,6 +122,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--audio", required=True, type=Path)
+    parser.add_argument("--madmom-path", type=Path, default=Path("third_party/madmom"),
+                        help="checkout of the reference implementation (built in place)")
     parser.add_argument("--out", type=Path, default=Path("tests/golden"))
     parser.add_argument("--groups", nargs="+", default=None)
     parser.add_argument("--max-networks", type=int, default=None,
