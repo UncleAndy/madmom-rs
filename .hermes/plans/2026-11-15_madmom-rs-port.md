@@ -1062,14 +1062,44 @@ float32 при нормировке (NumPy суммирует попарно). �
 **Files:** Create `crates/madmom-audio/src/spectrogram.rs`;
 Test `…/tests/spectrogram.rs` (порт `tests/test_audio_spectrogram.py`, 49 тестов).
 
-- [ ] Шаг 1 (тест): `Spec` = |STFT|; `FilteredSpectrogram` = `spec · filterbank`;
+- [x] Шаг 1 (тест): `Spec` = |STFT|; `FilteredSpectrogram` = `spec · filterbank`;
       `LogarithmicSpectrogram` (`log10`, `mul`, `add`); `SpectrogramDifference`
       (`diff_ratio`, `diff_frames`, `diff_max_bins`, `positive_diffs`, `stack_diffs`);
       `SuperFluxProcessor` (композиция).
-- [ ] Шаг 2 (тест): сверка с `tests/golden/{filt_6_30_17000,logspec,diff_0.5_pos}.npy`.
+- [x] Шаг 2 (тест): сверка с `tests/golden/{filt_6_30_17000,logspec,diff_0.5_pos}.npy`.
 - [ ] Шаг 3 (тест): `MultiBandSpectrogram`, `SemitoneBandpassSpectrogram` —
       на известных из тестов madmom значениях.
 - [ ] Шаг 4: коммит `feat(audio): spectrograms and differences`.
+
+**Статус: сделана основная часть (2026-11-15).** `crates/madmom-audio/src/spectrogram.rs`:
+`spec` (|STFT|), `Spectrogram` (стадии плоским набором: `filter`, `logarithmic`,
+`difference`, `filter_with`, `positive_diff`), `diff_frames` (порт `_diff_frames`),
+`DifferenceParameters`, `StackDiffs` (нет/горизонтально/вертикально; глубина — отказ),
+процессоры `SpectrogramProcessor`, `FilteredSpectrogramProcessor`,
+`LogarithmicSpectrogramProcessor`, `LogarithmicFilteredSpectrogramProcessor` (та, что
+используют цепочки биений) и `SpectrogramDifferenceProcessor`. В `Filterbank` добавлены
+`center_frequencies`/`corner_frequencies`/`fmin`/`fmax` (нужны как частоты бинов после
+фильтрации) и они сверены с эталоном.
+
+Сверка постадийно против дампов `sample.*.npy` (граница 1e-5):
+
+```
+spec         max |Δ| = 7.629e-6      logspec      max |Δ| = 1.192e-7
+filt         max |Δ| = 7.629e-6      diff         max |Δ| = 2.384e-7
+logspec(1x)  max |Δ| = 1.192e-7   (комбинированный процессор == раздельные)
+```
+
+7.629e-6 — это ровно **один ulp float32** при величинах 64…128: обе реализации FFT
+сходятся в float64, а приведение к `complex64` переворачивает последний бит у части
+значений. Это и есть причина, по которой допуск для спектрограмм 1e-5, а не 1e-9 —
+записано в README дампов. `diff_frames`, вычисленный из `diff_ratio=0.5` и окна
+2048/441, совпал с эталоном (=1); первые `diff_frames` строк разности нулевые, как и
+должно быть из-за трюка с `+inf`.
+
+**Осталось по задаче:** `MultiBandSpectrogram` (несколько фильтрбанков на одном STFT),
+`SemitoneBandpassSpectrogram` (нужен полутоновый фильтрбанк из Task 1.4, то есть
+`ellip`+`filtfilt`), `diff_max_bins > 1` (нужна семантика `scipy.ndimage.maximum_filter`)
+и глубинное стекирование (`dstack`). Все четыре — явные отказы в коде, а не тихие пропуски.
 
 #### Task 1.6: `chroma`, `cepstrogram`, `hpss`, `comb_filters`
 
