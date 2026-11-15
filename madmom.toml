@@ -1,0 +1,20 @@
+# madmom-rs runtime configuration.
+#
+# Values here are defaults; every field can be overridden by an environment
+# variable (see the plan, decision D10).
+
+[triton]
+# Model repository layout: <repository>/<model_name>/config.pbtxt and
+# <repository>/<model_name>/<version>/model.onnx
+repository = "third_party/madmom-models-onnx/models"
+# Directory with the Triton backend shared libraries (built by
+# tools/build_onnx_backend.sh).
+backend_directory = "third_party/triton-runtime/backends"
+# -1 selects the latest available version of a model.
+model_version = -1
+# "explicit" loads only the models listed in startup_models.
+control = "explicit"
+# CPU-only builds: no GPU metrics, pinned memory pool disabled.
+cpu_only = true
+# Models loaded during server start-up, in dependency order.
+startup_models = []
