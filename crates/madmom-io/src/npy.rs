@@ -26,17 +26,29 @@ pub type Result<T> = std::result::Result<T, NpyError>;
 pub enum NpyError {
     /// The file could not be read.
     Io {
+        /// Path that was being read.
         path: PathBuf,
+        /// Underlying I/O error.
         source: std::io::Error,
     },
     /// The file does not start with the NumPy magic.
     BadMagic,
     /// The `.npy` format version is not supported.
-    UnsupportedVersion { major: u8, minor: u8 },
+    UnsupportedVersion {
+        /// Major version byte of the container.
+        major: u8,
+        /// Minor version byte of the container.
+        minor: u8,
+    },
     /// The header dictionary could not be parsed.
     BadHeader(String),
     /// The buffer ended before the array data did.
-    BufferTooShort { need: usize, have: usize },
+    BufferTooShort {
+        /// Number of bytes the header describes.
+        need: usize,
+        /// Number of bytes actually available.
+        have: usize,
+    },
     /// The dtype is not among the supported ones.
     UnsupportedDtype(String),
     /// The array has object dtype (`|O`), i.e. it holds pickled Python objects.
@@ -46,7 +58,10 @@ pub enum NpyError {
     /// The requested member does not exist in the zip container.
     MissingMember(String),
     /// A scalar was requested from an array with more than zero dimensions.
-    NotScalar { shape: Vec<usize> },
+    NotScalar {
+        /// Shape that was found instead of the expected 0-d array.
+        shape: Vec<usize>,
+    },
 }
 
 impl fmt::Display for NpyError {
