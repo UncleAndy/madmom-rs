@@ -534,7 +534,7 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
 
 | фаза | содержание | объём | результат |
 |---|---|---|---|
-| 0 | каркас, devShell, контракт инференса, эталонные дампы | M | `cargo test` зелёный на каркасе + golden-режим + дампы эталона |
+| 0 | каркас, devShell, сборка Triton (core+backend), конвертер ONNX, контракт инференса, дампы эталона | L | `cargo test` зелёный + смоук-инференс через собранный `libtritonserver.so` + ONNX-репозиторий |
 | 1 | audio-ядро (signal→stft→spectrogram→filterbank→diff) | L | паритет с `tests/test_audio_*.py` |
 | 2 | пре-процессинг NN-входов + Triton in-process (ONNX) | M | входы сетей = дампы эталона; активации из ONNX = `.npz` |
 | 3 | `ml/hmm` + DBN/CRF биения, пик-пикинг онсетов, темп | M | `BeatTracker`/`DBNBeatTracker`/`OnsetDetector`/`TempoDetector` = `.txt` |
@@ -654,6 +654,67 @@ pub fn assert_array_close(a: &ArrayD<f32>, b: &ArrayD<f32>, atol: f32, rtol: f32
       у `sample.deep_chroma.npz` — `(29,12) float32, fps=10`).
 - [ ] Шаг 2: тест на файл с 0-d `fps` (object-array) — не падать, вернуть `fps=None`.
 - [ ] Шаг 3: коммит `feat(io): npy/npz readers + testkit assertions`.
+
+#### Task 0.7: Triton runtime из исходников: `libtritonserver.so` + ONNX Runtime backend
+
+Решение владельца: **собираем `core` сами** (не контейнер). Исходники уже на месте —
+сабмодуль `third_party/tritonserver-rs/core` (ветка r24.08, C-API 1.34).
+
+**Files:** Create `tools/build_triton_core.sh`, `tools/build_onnx_backend.sh`,
+`tools/triton_env.sh`; (выход, gitignored) `third_party/triton-runtime/{lib,backends}`.
+
+- [ ] Шаг 1: `libtritonserver.so` (из `core/CMakeLists.txt`: по умолчанию собирается
+      только заголовок+заглушка, полная библиотека — только с `TRITON_CORE_HEADERS_ONLY=OFF`):
+      ```bash
+      cmake -S third_party/tritonserver-rs/core -B build/triton-core -DCMAKE_BUILD_TYPE=Release \
+        -DTRITON_CORE_HEADERS_ONLY=OFF -DTRITON_ENABLE_GPU=OFF -DTRITON_ENABLE_MALI_GPU=OFF \
+        -DTRITON_ENABLE_METRICS_GPU=OFF -DTRITON_ENABLE_METRICS=OFF -DTRITON_ENABLE_STATS=OFF \
+        -DTRITON_ENABLE_TRACING=OFF -DTRITON_ENABLE_NVTX=OFF -DTRITON_ENABLE_ENSEMBLE=OFF \
+        -DTRITON_ENABLE_GCS=OFF -DTRITON_ENABLE_S3=OFF -DTRITON_ENABLE_AZURE_STORAGE=OFF \
+        -DTRITON_COMMON_REPO_TAG=r24.08 -DTRITON_THIRD_PARTY_REPO_TAG=r24.08 \
+        -DCMAKE_INSTALL_PREFIX=$PWD/third_party/triton-runtime
+      ```
+      Теги `*_REPO_TAG` **обязаны** быть `r24.08` (по умолчанию `main` — несовместимо с
+      ядром r24.08). Метрики/статистика выключены: `METRICS=ON` требует `STATS=ON`, а
+      `METRICS_GPU=ON` — `GPU=ON` (иначе CMake падает с FATAL_ERROR).
+- [ ] Шаг 2: учесть, что `core` тянет и **собирает** третьи стороны (gRPC, protobuf,
+      absl, re2, c-ares, prometheus-cpp, googletest) из `triton-inference-server/third_party`
+      через FetchContent/ExternalProject → нужна сеть при конфигурации и ~гигабайты
+      сборки. Герметичная nix-деривация для этого — отдельная задача (см. §9, вопрос 2).
+- [ ] Шаг 3: **ONNX Runtime backend** (без него сервер не загрузит ONNX-модели):
+      ```bash
+      cmake -S <onnxruntime_backend r24.08> -B build/ort-backend -DCMAKE_BUILD_TYPE=Release \
+        -DTRITON_ENABLE_GPU=OFF \
+        -DTRITON_ONNXRUNTIME_INCLUDE_PATHS=$(nix eval --raw nixpkgs#onnxruntime)/include \
+        -DTRITON_ONNXRUNTIME_LIB_PATHS=$(nix eval --raw nixpkgs#onnxruntime)/lib
+      ```
+      (альтернатива — дать backend'у собрать ONNX Runtime самому: дольше и по умолчанию
+      с CUDA). Результат — `libtriton_onnxruntime.so` в `third_party/triton-runtime/backends/`.
+- [ ] Шаг 4: `tools/triton_env.sh` — экспорт `MADMOM_MODEL_REPO`,
+      `MADMOM_TRITON_BACKENDS=$PWD/third_party/triton-runtime/backends`,
+      `LD_LIBRARY_PATH=$PWD/third_party/triton-runtime/lib` (нужен и для линковки
+      `tritonserver-rs` — `LIBRARY_PATH` при сборке, `LD_LIBRARY_PATH` при запуске).
+- [ ] Шаг 5 (смоук-тест, до всей Фазы 2): крошечная ONNX-модель (`add`) + `config.pbtxt`
+      с `KIND_CPU` → пример `examples/smoke_triton.rs`: сервер стартует, `is_ready()`
+      истинно, один инференс даёт ожидаемые числа. Только после этого идёт Task 2.3.
+- [ ] Шаг 6: коммит `build(triton): build libtritonserver + onnxruntime backend from source`.
+
+#### Task 0.8: Конвертер моделей → ONNX (пишется до Фазы 2)
+
+**Files:** Create `tools/convert_to_onnx.py` (исполняемая спецификация §2.1/§2.2),
+`tools/onnx_spec.py` (общие хелперы: упаковка гейтов, свёртки, TCN);
+Test `tools/tests/test_convert.py`.
+
+- [ ] Шаг 1: загрузчик pickle по D1 (с шимами NumPy 2), выгрузка весов в numpy.
+- [ ] Шаг 2: сборка графов по таблице «слой madmom → ONNX» (§2.1) + генерация
+      `config.pbtxt` (CPU-only) для каждой модели; имена каталогов — из §2.1.
+- [ ] Шаг 3 (тест): для каждой сконвертированной модели — прогон через `onnxruntime`
+      на эталонных признаках (`tests/golden/preproc/*.npy`) и сравнение с эталонным
+      выходом сети (`tests/golden/activations/<model>.npy`), допуск `1e-4`. Тест
+      падает с именем модели, а не «что-то не сошлось».
+- [ ] Шаг 4: `--report` — сколько моделей сконвертировано, формы входов/выходов,
+      sha256 файлов (пригодится в Task 2.5 как ожидаемый список).
+- [ ] Шаг 5: коммит `feat(tools): madmom pickle -> onnx converter`.
 
 ---
 
@@ -1128,7 +1189,8 @@ Test `crates/madmom-cli/tests/*.rs` (порт `tests/test_bin.py`, 105 тест�
 | R13 | ONNX-репозиторий моделей: 92 сети + CRF + GMM; 8-сетевые ансамбли (8 моделей или одна ансамблевая); `config.pbtxt`, имена/версии моделей и тензоров, dtype (ожидается float32), форма входа (2-D/3-D) | блокирует Task 2.4 и задачи 4.5/4.6; Фазы 3–5 идут в golden-режиме. Нужны от владельца: имена моделей и тензоров + как представлены ансамбли |
 | R14 | Задержка online-инференса (1 кадр за вызов при 100 fps) | инференс локальный (in-process, не сеть), но вызов на кадр дорог: замер в Task 2.3 шаг 6; при провале — батчинг N кадров |
 | R15 | Не-NN модели: `ConditionalRandomField` (аккорды) и `GMM` (паттерны) | **решено**: перенос в ONNX (решение 3). Наш объём — контракт (batch на файл; выход: последовательность состояний для CRF, log-плотности для GMM) и приёмка; математика не портируется |
-| R16 | Сборка и деплой Triton: нужны `libtritonserver.so`, бинарники бэкендов (ONNX Runtime), `libclang` для bindgen | **режим выбран: CPU-only** (`default-features = false`, `pinned_memory_pool_byte_size(0)`, `KIND_CPU`); GPU — отдельной фичей позже. Осталось выбрать способ получения либы: контейнер Triton 24.08+ (`third_party/tritonserver-rs/Dockerfile.dev`) или сборка `core` из его сабмодуля как nix-деривация |
+| R16 | Сборка Triton из исходников: `TRITON_CORE_HEADERS_ONLY=OFF` + третьи стороны (gRPC/protobuf/absl/re2/prometheus) тянутся из `triton-inference-server/third_party` при конфигурации; отдельно нужен ONNX Runtime backend и `libclang` для bindgen | **решено: CPU-only + сборка из сабмодуля `core`** (Task 0.7). Остатки: сборка требует сети и времени; герметичная nix-деривация не сделана (сначала devShell-путь + `tools/build_triton_core.sh`); ORT-бэкенд линкуется с системным ONNX Runtime |
+| R16a | Отсутствие герметичной nix-сборки Triton: CI на чистой машине не соберёт либу сам | принять как ограничение v1 (сборка — разовая операция с сетью, артефакт в `third_party/triton-runtime`, gitignored) либо отдельной задачей сделать derivation с предвыборкой `third_party`/`common` |
 | R17 | Проверка сборки в этой среде невозможна: `cargo` в sandbox отсутствует, сети нет (crates не скачать), либы Triton нет | сборка и прогоны — на хосте владельца; в плане даны точные команды, выдуманных результатов нет |
 
 ## 7. Что не портируется
@@ -1165,6 +1227,11 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy])' --run \
 nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.scipy])' --run \
   'python3 tools/dump_preproc.py --out tests/golden/preproc'
 
+# 2b. Triton runtime из исходников (Task 0.7) — один раз, требует сети и времени
+./tools/build_triton_core.sh      # libtritonserver.so (CPU-only, теги r24.08)
+./tools/build_onnx_backend.sh     # libtriton_onnxruntime.so против системного ORT
+source ./tools/triton_env.sh      # LD_LIBRARY_PATH, MADMOM_TRITON_BACKENDS, MADMOM_MODEL_REPO
+
 # 3b. Конвертация моделей в ONNX (по §2.1; источник — 92 .pkl из сабмодуля madmom)
 nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.onnx])' --run \
   'python3 tools/convert_to_onnx.py \
@@ -1191,32 +1258,31 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
 1. **Порядок фаз** — «флагманы» (биения / онсеты / темп) первыми (Фаза 3).
 2. **MIDI** — `midly` + переходный слой событий (Task 5.3).
 3. **Имя публичного крейта** — `madmom-rs`.
-4. **Не-NN модели** (CRF аккордов, GMM паттернов) — перенос в ONNX; уточнение контракта
-   (GMM — целиком в графе; CRF — граф отдаёт emission/transition/initial/final, Viterbi
-   в Rust) в §2.2.
-5. **NN-инференс** — `tritonserver-rs` **in-process** (bindings к C-API Triton,
-   `libtritonserver.so`), модели — ONNX-репозиторий (§2.1); NN-слои в Rust не
-   портируются (D1/D2/D10, Фаза 2). Сабмодуль — `third_party/tritonserver-rs`.
-6. **CPU-only** (решение владельца): `default-features = false`,
-   `pinned_memory_pool_byte_size(0)`, `instance_group KIND_CPU`; GPU — отдельной фичей позже.
-7. **`madmom-eval`** (метрики) — отложен, вне первого релиза; `bin/evaluate` и тесты
-   `test_evaluation_*`/`test_bin_evaluate` тоже. CLI первого релиза — 24 программы.
-8. **Спецификация ONNX-репозитория** (имена, раскладка, тензоры, ансамбли, отображение
-   слоёв) и **контракт CRF/GMM** — приняты мной и зафиксированы в §2.1 и §2.2
-   (владелец делегировал: «на твоё усмотрение»).
+4. **Не-NN модели** (CRF, GMM) — в ONNX; контракт (GMM целиком в графе; CRF — граф
+   отдаёт `emission/transition/initial/final`, Viterbi в Rust) в §2.2.
+5. **NN-инференс** — `tritonserver-rs` **in-process** (bindings к C-API Triton),
+   сабмодуль `third_party/tritonserver-rs`; модели — ONNX-репозиторий (§2.1).
+6. **CPU-only**: `default-features = false`, `pinned_memory_pool_byte_size(0)`,
+   `instance_group KIND_CPU`; GPU — отдельной фичей позже.
+7. **`libtritonserver.so` и ONNX Runtime backend — собираем из исходников**
+   (`core` = сабмодуль, Task 0.7), не контейнер. Метрики/статистика/трассировка
+   выключены, теги репозиториев r24.08.
+8. **Конвертер ONNX** (`tools/convert_to_onnx.py`) пишем и доводим до зелёных тестов
+   **до Фазы 2** (Task 0.8) — иначе Task 2.5 нечего принимать.
+9. **ONNX-репозиторий** — `third_party/madmom-models-onnx/models` (§2.1).
+10. **Мёртвая запись** `third_party/madmom_models` в `.gitmodules` удалена (коммит
+    `019e1bf`); модели приходят из вложенного сабмодуля `madmom/models`.
+11. **`madmom-eval`** — отложен, вне первого релиза; CLI первого релиза — 24 программы.
 
 **Осталось решить:**
 
-1. **Способ получения `libtritonserver.so` + бэкендов** (R16): контейнер Triton 24.08+
-   (`third_party/tritonserver-rs/Dockerfile.dev`, как в `examples/`) или сборка `core`
-   из сабмодуля как nix-деривация. Нужен выбранный путь, чтобы `flake.nix` devShell и CI
-   были воспроизводимыми; на этой машине ни либы, ни `/opt/tritonserver`, ни CUDA нет.
-2. **Репозиторий ONNX-моделей** (§2.1): я заложил `third_party/madmom-models-onnx/models`
-   как отдельный репозиторий/сабмодуль (лицензия моделей CC BY-NC-SA). Если владелец
-   предпочтёт другое место (например, рядом с `tritonserver-rs/examples/models/`) —
-   назвать путь, план поправлю.
-3. **Кто запускает конвертацию** (`tools/convert_to_onnx.py`, §2.1): скрипт пишем мы,
-   запуск — на стороне владельца (как и было решено). Нужно ли, чтобы скрипт был готов
-   до начала Фазы 2 (рекомендую: да, иначе Task 2.5 нечего принимать).
-4. **Лишняя запись в `.gitmodules`** (`third_party/madmom_models` без каталога, Task 0.0
-   шаг 3): удалить или выкачать? Правки в чужие/свои подмодули без решения владельца не делаю.
+1. **ONNX Runtime для backend'а:** системный из nixpkgs (`nixpkgs#onnxruntime`) или
+   пусть backend собирает ORT сам (дольше, по умолчанию с CUDA). Я заложил системный;
+   подтвердить версию ORT, совместимую с backend'ом r24.08.
+2. **Герметичная nix-деривация Triton** (R16a): нужна ли в v1 (для CI на чистой машине),
+   или v1 живёт на разовой сборке с сетью + gitignored `third_party/triton-runtime`
+   (рекомендую второе, derivation — отдельной задачей).
+3. **Размер/время сборки:** `core` с третьими сторонами (gRPC, protobuf, prometheus)
+   — это десятки минут и гигабайты. Если хочется радикально меньше — можно отдельной
+   задачей поднять конфигурацию без gRPC/HTTP-эндпоинтов (in-process они не нужны),
+   но это правка чужого CMake (спрошу отдельно, сейчас не трогаю).
