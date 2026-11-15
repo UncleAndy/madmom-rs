@@ -9,3 +9,11 @@ repository.workspace = true
 
 [dependencies]
 madmom-core = { path = "../madmom-core" }
+ndarray.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# the golden reference dumps are NumPy .npy files, so the tests read them with
+# the crate that already knows that container format
+madmom-io = { path = "../madmom-io" }
+madmom-testkit = { path = "../madmom-testkit" }

@@ -30,6 +30,10 @@ name = "madmom-audio"
 version = "0.1.0"
 dependencies = [
  "madmom-core",
+ "madmom-io",
+ "madmom-testkit",
+ "ndarray",
+ "thiserror",
 ]
 
 [[package]]
