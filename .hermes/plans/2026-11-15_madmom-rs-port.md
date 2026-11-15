@@ -188,7 +188,7 @@ bindings к C-API Triton: сервер поднимается **в том же �
   tokio-рантайме (`block_on`), чтобы не менять стиль API madmom; конфиг —
   `madmom.toml` / `MADMOM_MODEL_REPO` (D10); online-режим получает бюджет задержки (R14);
 - локальные тесты Фаз 3–5 идут в **golden-режиме** (активации из фикстур madmom),
-  поэтому Triton нужен только для Task 2.4.
+  поэтому Triton нужен только для Task 2.5.
 
 *Справка для ONNX-переноса моделей (проверено на этом чек-ауте; сама конвертация —
 не задача порта):* все 92 `.pkl` — pickle протокола 2 (Python 2) с объектами
@@ -339,7 +339,7 @@ third_party/madmom-models-onnx/          # отдельный репозитор
 - путь по умолчанию: `MADMOM_MODEL_REPO` → `third_party/madmom-models-onnx/models` →
   `<repo>/models` (gitignored). Пока репозитория нет — Фазы 3–5 живут в golden-режиме.
 - **скрипт конвертации — наш**, `tools/convert_to_onnx.py` (исполняемая спецификация;
-  владелец может переиспользовать). Приёмка каждой модели — Task 2.5.
+  владелец может переиспользовать). Приёмка каждой модели — Task 2.4.
 
 **Отображение слоёв madmom → ONNX (что обязан сделать конвертер).** Ловушки, на которых
 расходится паритет, вынесены явно:
@@ -497,7 +497,7 @@ pub struct Activations { pub data: ArrayD<f32>, pub fps: Option<f64> }       // 
    для каждого шага пайплайна (signal → frames → stft → spec → filt → log → diff →
    activations → path → detections) сохраняется массив в `.npy`, чтобы ловить
    ошибку на первой стадии, а не на последней.
-4. **Triton in-process** (feature `triton-live`, Task 2.4): если активации из ONNX не
+4. **Triton in-process** (feature `triton-live`, Task 2.5): если активации из ONNX не
    совпали с `.npz`, дефект ищется сначала в пре-процессинге (`golden/preproc/*.npy`),
    потом в ONNX-переносе модели — но это не повод менять допуск.
 
@@ -714,7 +714,7 @@ Test `tools/tests/test_convert.py`.
       выходом сети (`tests/golden/activations/<model>.npy`), допуск `1e-4`. Тест
       падает с именем модели, а не «что-то не сошлось».
 - [ ] Шаг 4: `--report` — сколько моделей сконвертировано, формы входов/выходов,
-      sha256 файлов (пригодится в Task 2.5 как ожидаемый список).
+      sha256 файлов (пригодится в Task 2.4 как ожидаемый список).
 - [ ] Шаг 5: коммит `feat(tools): madmom pickle -> onnx converter`.
 
 ---
@@ -942,7 +942,7 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
       батчить N кадров (DBN-путь работает по forward-переменным и терпим к задержке).
 - [ ] Шаг 7: коммит `feat(ml): triton in-process inference (tritonserver-rs)`.
 
-#### Task 2.5: Приёмка ONNX-репозитория
+#### Task 2.4: Приёмка ONNX-репозитория
 
 **Files:** Create `crates/madmom-ml/tests/onnx_repo.rs`; Test — требует `MADMOM_MODEL_REPO`.
 
@@ -958,7 +958,7 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
       `KIND_CPU`), `server.model_is_ready(name, -1)` истинно для всех моделей.
 - [ ] Шаг 4: коммит `test(ml): onnx repository acceptance`.
 
-#### Task 2.4: Паритет активаций через Triton (ONNX)
+#### Task 2.5: Паритет активаций через Triton (ONNX)
 
 - [ ] Шаг 1 (тест, feature `triton-live`): `RNNBeatProcessor` = `sample.beats_blstm.npz`
       (`max|Δ| ≤1e-4`), `RNNOnsetProcessor` = `sample.onsets_brnn.npz`,
@@ -1243,7 +1243,7 @@ nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.onnx])' --run \
 # 4. Проверка порта (golden-режим, без сети)
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 
-# 5. Проверка с Triton in-process (Task 2.4) — нужны libtritonserver + бэкенды (R16)
+# 5. Проверка с Triton in-process (Task 2.5) — нужны libtritonserver + бэкенды (R16)
 MADMOM_MODEL_REPO=$PWD/../tritonserver-rs/models \
 MADMOM_TRITON_BACKENDS=/opt/tritonserver/backends \
 cargo test -p madmom-features --features triton-live
@@ -1270,7 +1270,7 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
    (`core` = сабмодуль, Task 0.7), не контейнер. Метрики/статистика/трассировка
    выключены, теги репозиториев r24.08.
 8. **Конвертер ONNX** (`tools/convert_to_onnx.py`) пишем и доводим до зелёных тестов
-   **до Фазы 2** (Task 0.8) — иначе Task 2.5 нечего принимать.
+   **до Фазы 2** (Task 0.8) — иначе Task 2.4 нечего принимать.
 9. **ONNX-репозиторий** — `third_party/madmom-models-onnx/models` (§2.1).
 10. **Мёртвая запись** `third_party/madmom_models` в `.gitmodules` удалена (коммит
     `019e1bf`); модели приходят из вложенного сабмодуля `madmom/models`.
