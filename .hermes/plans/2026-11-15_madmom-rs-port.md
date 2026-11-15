@@ -682,12 +682,11 @@ pub fn assert_array_close(a: &ArrayD<f32>, b: &ArrayD<f32>, atol: f32, rtol: f32
       absl, re2, c-ares, prometheus-cpp, googletest) из `triton-inference-server/third_party`
       через FetchContent/ExternalProject → нужна сеть при конфигурации и ~гигабайты
       сборки. Герметичная nix-деривация для этого — отдельная задача (см. §9, вопрос 2).
-- [ ] Шаг 3: **ONNX Runtime backend** — сабмодуль `third_party/onnxruntime_backend`
-      (решение владельца). **Ветку обязательно выровнять по ядру:**
-      `git -C third_party/onnxruntime_backend checkout r24.08` — сейчас сабмодуль стоит на
-      `main` (`313143a`, 2026-11-05), а `main` требует CMake ≥ 3.31.8 и C++20, тогда как
-      `core` у нас r24.08 (C++17, C-API 1.34, к которому привязан `tritonserver-rs`).
-      Ветка `origin/r24.08` в репозитории есть.
+- [x] Шаг 3: **ONNX Runtime backend** — сабмодуль `third_party/onnxruntime_backend`,
+      **выровнен по ядру: ветка `r24.08`** (коммит `ab34b48`, 2024-08-15) — сделано
+      владельцем. Проверено: требования этой ветки — CMake ≥ 3.17 и C++17, т.е. совпадают
+      с `core` r24.08. Связка версий согласована: `core` r24.08 (C-API 1.34) +
+      backend r24.08 + bindings `tritonserver-rs` 0.4.1 (минимальный контейнер 24.08).
 - [ ] Шаг 3a: **ONNX Runtime вендорим** (решение владельца; системный ORT не используем).
       Проверенный по `CMakeLists.txt` backend'а набор возможностей:
       (а) внешний ORT — `-DTRITON_ONNXRUNTIME_INCLUDE_PATHS=…/include`
@@ -699,8 +698,13 @@ pub fn assert_array_close(a: &ArrayD<f32>, b: &ArrayD<f32>, atol: f32, rtol: f32
       сверяет версию с `TRITON_BUILD_ONNXRUNTIME_VERSION`).
       Выбираем **(а) + наш пиннинг**: официальный ORT-релиз скачиваем один раз (URL + sha256
       фиксируем в `tools/build_onnx_backend.sh`), распаковываем в
-      `third_party/triton-runtime/onnxruntime/` и передаём пути. Версию ORT брать из
-      бэкенда r24.08 (её фиксирует его CI/Dockerfile), а не из головы.
+      `third_party/triton-runtime/onnxruntime/` и передаём пути.
+      **Версия ORT:** в самом репозитории бэкенда она не зафиксирована (её подаёт CI через
+      `TRITON_BUILD_ONNXRUNTIME_VERSION`), поэтому берём **эпохально совпадающую с r24.08
+      (август 2024) — `1.18.1`** как стартовую, sha256 пишем в скрипт; привязка по ABI —
+      вендоренная `libonnxruntime.so.1` рядом с backend'ом + rpath/`LD_LIBRARY_PATH`.
+      Если понадобится ровно та версия, что в образе `tritonserver:24.08-py3`, её можно
+      прочитать из образа и обновить пиннинг (это одна строка в скрипте).
       Флаги: `-DTRITON_ENABLE_GPU=OFF` (иначе `TRITON_ENABLE_ONNXRUNTIME_TENSORRT=ON`
       падает с FATAL_ERROR, т.к. требует GPU), `-DTRITON_ENABLE_STATS=OFF`.
       Результат — `libtriton_onnxruntime.so` (+ вендоренные ORT-либы) в
@@ -1299,10 +1303,9 @@ target/release/BeatTracker single third_party/madmom/tests/data/audio/sample.wav
 
 **Осталось решить:**
 
-1. **Версия вендоренного ONNX Runtime:** берётся из бэкенда r24.08 (его CI/Dockerfile
-   её фиксирует) — на первой сборке выпишу конкретную версию и sha256 в
-   `tools/build_onnx_backend.sh`; если у тебя есть предпочтение (например, ровно та,
-   что в образе `tritonserver:24.08`) — скажи.
+1. **Герметичность для CI** (R16a): вариант D уже принят — подключаем C (вендоренные
+   бинарники из NGC-образа) или B (nix-деривация) в тот момент, когда понадобится сборка
+   на чистой машине. Триггер и критерий выбора — в описании вариантов выше.
 2. **Герметичность сборки Triton** (R16a). Варианты (нужен выбор владельца):
 
    - **A. Разовая сборка в devShell** (что уже в Task 0.7): сеть разрешена, артефакт в
