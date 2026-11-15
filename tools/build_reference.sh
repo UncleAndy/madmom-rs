@@ -23,7 +23,7 @@ out="${root}/tools/reference-baseline.txt"
 # One package set for build, import and tests, so the three steps cannot drift:
 # madmom's __init__ imports mido, and it reads its own version via
 # importlib.metadata, which is why build_madmom_ext.py also runs egg_info.
-PY_PACKAGES='ps.numpy ps.scipy ps.cython ps.setuptools ps.mido ps.pytest'
+PY_PACKAGES='ps.numpy ps.scipy ps.cython ps.setuptools ps.mido ps.pytest ps.pytest-timeout'
 BUILD_PACKAGES="python3.withPackages(ps: [${PY_PACKAGES}])"
 TEST_PACKAGES="${BUILD_PACKAGES}"
 
@@ -45,9 +45,19 @@ echo "==> running the reference test suite (baseline)"
   echo "#       are recorded as-is; they are the starting point of the port, not regressions."
   echo
 } > "${out}"
+# tests/test_bin.py imports madmom's bin/* programs in-process and runs them with
+# `batch -j 1`, i.e. through a multiprocessing pool; in an environment with an
+# isolated IPC namespace the workers block forever. Set MADMOM_SKIP_BIN=1 there.
+# --timeout turns any other hang into a failure with a traceback instead of a
+# stalled run.
+pytest_args=(-q -p no:cacheprovider --no-header --timeout=120 --timeout-method=thread)
+if [ -n "${MADMOM_SKIP_BIN:-}" ]; then
+  pytest_args+=(--ignore=tests/test_bin.py)
+  echo "==> MADMOM_SKIP_BIN set: skipping tests/test_bin.py" | tee -a "${out}"
+fi
 set +e
 nix-shell -p "${TEST_PACKAGES}" --run \
-  "cd '${madmom}' && python3 -m pytest tests -q -p no:cacheprovider --no-header" 2>&1 | tee -a "${out}"
+  "cd '${madmom}' && python3 -m pytest tests ${pytest_args[*]}" 2>&1 | tee -a "${out}"
 status=${PIPESTATUS[0]}
 set -e
 echo "==> pytest exit status ${status}; baseline written to ${out}"

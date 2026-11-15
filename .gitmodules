@@ -4,3 +4,6 @@
 [submodule "third_party/tritonserver-rs"]
 	path = third_party/tritonserver-rs
 	url = https://github.com/UncleAndy/tritonserver-rs
+[submodule "third_party/onnxruntime_backend"]
+	path = third_party/onnxruntime_backend
+	url = git@github.com:triton-inference-server/onnxruntime_backend.git
