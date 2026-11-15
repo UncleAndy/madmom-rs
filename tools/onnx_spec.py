@@ -521,9 +521,9 @@ def with_model_width(spec: ModelSpec, model: Any) -> ModelSpec:
     dims = list(spec.input_dims)
     dims[1] = width
     out = spec.output_dims
-    if spec.family == "feedforward" and out == ((-1, 1),):
-        # chroma_dnn answers with 12 chroma bins, not one value: the default has to give way
-        # to the model whenever the last layer says something else.
+    if spec.family not in ("tcn",) and out == ((-1, 1),):
+        # chroma_dnn answers with 12 chroma bins and notes_brnn with 88, not one value: the
+        # default has to give way to the model whenever the last layer says something else.
         produced = output_width_of(model)
         if produced is not None:
             out = ((-1, produced),)
@@ -537,7 +537,10 @@ def build_model(model: Any, spec: ModelSpec) -> Any:
         spec = ModelSpec(**{**spec.__dict__, "family": family})
     spec = with_model_width(spec, model)
     if family in ("lstm", "blstm", "gru", "bgru", "rnn", "brnn"):
-        return _build_recurrent_family(model, family, spec)
+        # Primitive-op recurrence (tools/onnx_recurrent.py): the ONNX LSTM operator cannot
+        # express madmom's peephole connections, onnxruntime does not implement its P input.
+        import onnx_recurrent
+        return onnx_recurrent.build(model, spec)
     if family in BUILDERS:
         layers = [node for node in getattr(model, "layers", []) if isinstance(node, _Stub)]
         return BUILDERS[family](layers, spec.input_dims[-1], spec)
