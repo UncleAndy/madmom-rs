@@ -1251,6 +1251,41 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
 
 ### Фаза 3 — HMM-ядро и «флагманские» пайплайны (биения, онсеты, темп)
 
+**Статус (2026-11-15): биения в golden-режиме работают.** Сделано:
+
+- **Task 3.1 (частично)** — `crates/madmom-ml/src/hmm.rs`: `TransitionModel`
+  (CSR-подобное разреженное представление, `make_sparse`/`from_dense`, логарифмы
+  вероятностей считаются один раз при построении), трейт `ObservationModel`,
+  `DiscreteObservationModel` (таблица `(состояния × наблюдения)`, как в эталоне),
+  `HiddenMarkovModel::viterbi` в лог-домене. Проверено доктестом самого madmom
+  (`-12.87…`, путь `[1,1,0,0,1,1,1,0,0]`) и тестами на разреженную раскладку, отказ при
+  не-распределении и `-inf` → пустой путь. **Не сделано:** `forward`/`forward_step`/`reset`
+  (нужны онлайн-режиму), `make_dense`.
+- **Task 3.2 (частично)** — `crates/madmom-features/src/beats_hmm.rs`: `BeatStateSpace`
+  (линейные и лог-интервалы с итеративной дедупликацией), `exponential_transition`
+  (порог `np.spacing(1)`, нормировка строк, `lambda=None` → диагональ),
+  `BeatTransitionModel`, `RNNBeatTrackingObservationModel`. **Не сделано:** `BarStateSpace`,
+  `MultiPatternStateSpace`, `BarTransitionModel`, `MultiPatternTransitionModel`,
+  `RNNDownBeatTrackingObservationModel`, `GMMPatternTrackingObservationModel`.
+- **Task 3.4 (частично)** — `crates/madmom-features/src/beats.rs`: `threshold_activations`,
+  `DBNBeatTrackingProcessor` (константы эталона 55/215/100/16/0/true) с `process_offline`
+  (Viterbi → регионы beat-range → пик активации → секунды). **Не сделано:** онлайн-режим
+  (`forward`+`argmax`), `correct=false` (`argrelmin` из scipy), `BeatTrackingProcessor`,
+  `BeatDetectionProcessor`, `CRFBeatDetectionProcessor`.
+
+Главная сверка (golden-режим: активации из эталонного дампа, сеть не нужна):
+
+```
+путь Витерби: 281 из 281 кадров идентичны эталону (точные целые состояния)
+log probability: -758.193325 против -758.193326 в дампе
+биения: [0.1, 0.45, 0.8, 1.12, 1.48, 1.8, 2.15, 2.49] — все в пределах 1e-6
+```
+
+Это первый сквозной результат: `WAV → кадры → STFT → фильтрбанк → логи-спектр →
+разности → (активации из фикстуры) → DBN → биения`. Осталось подключить саму сеть
+(Фаза 2, Triton на хосте) — и флагманский пайплайн биений будет полным.
+
+
 #### Task 3.1: `ml::hmm`
 
 **Files:** Create `crates/madmom-ml/src/hmm.rs`; Test `…/tests/hmm.rs`
@@ -1260,13 +1295,13 @@ pub fn start_server(cfg: &TritonConfig) -> Result<Arc<Server>>;   // Options + S
 `make_sparse/make_dense/from_dense`, `ObservationModel` (trait),
 `DiscreteObservationModel`, `HiddenMarkovModel::{viterbi, forward, forward_step, reset}`.
 
-- [ ] Шаг 1 (тест): doctest `TransitionModel.from_dense([0,1,0,1],[0,0,1,1],[0.7,0.3,0.6,0.4])`
+- [x] Шаг 1 (тест): doctest `TransitionModel.from_dense([0,1,0,1],[0,0,1,1],[0.7,0.3,0.6,0.4])`
       + `DiscreteObservationModel([[0.2,0.3,0.5],[0.7,0.1,0.2]])` → `viterbi([0,0,1,1,0,0,0,2,2])`
       = `[1,1,0,0,1,1,1,0,0]`, `log_p ≈ -12.87`; таблица `forward` из докстринга.
-- [ ] Шаг 2 (тест): `make_sparse` поднимает `ValueError`, если распределение не
+- [x] Шаг 2 (тест): `make_sparse` поднимает `ValueError`, если распределение не
       суммируется в 1; CSR-инвариант: `pointers[state]..pointers[state+1]` покрывает
       все переходы *в* `state`.
-- [ ] Шаг 3 (тест): Viterbi с `-inf` → предупреждение и пустой путь (`is_empty`).
+- [x] Шаг 3 (тест): Viterbi с `-inf` → предупреждение и пустой путь (`is_empty`).
 - [ ] Шаг 4: коммит `feat(ml): HMM viterbi/forward core`.
 
 #### Task 3.2: Пространства состояний и модели наблюдений биений
@@ -1318,8 +1353,8 @@ Test `…/tests/beats.rs` (порт `tests/test_features_beats.py`, 11 тест�
 `CRFBeatDetectionProcessor`: `INTERVAL_SIGMA=0.18`, `FACTORS=[0.5,0.67,1.0,1.5,2.0]`,
 `NUM_INTERVALS=5`, `MIN_BPM=20`, `MAX_BPM=240`, `ACT_SMOOTH=0.09`, `HIST_SMOOTH=7`.
 
-- [ ] Шаг 1 (тест): `threshold_activations` (первый/последний кадр ≥ threshold).
-- [ ] Шаг 2 (тест): `DBNBeatTrackingProcessor` offline: `viterbi` → `correct=True`
+- [x] Шаг 1 (тест): `threshold_activations` (первый/последний кадр ≥ threshold).
+- [ ] Шаг 2 (тест): `DBNBeatTrackingProcessor` offline (offline-часть сделана): `viterbi` → `correct=True`
       (пик активаций внутри beat-range через `np.diff(pointers[path])`) и
       `correct=False` (`argrelmin(state_positions[path], mode='wrap')`);
       online: `forward` + `argmax` + правило `next_beat = last + 60/max_bpm`.
