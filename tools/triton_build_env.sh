@@ -34,7 +34,7 @@ esac
 # 2. system libraries
 _extra_cxx=""
 _extra_ld=""
-for _spec in rapidjson numactl boost boost.dev; do
+for _spec in rapidjson numactl numactl.dev boost boost.dev; do
   command -v nix-build >/dev/null 2>&1 || break
   _path="$(nix-build '<nixpkgs>' -A "${_spec}" --no-out-link 2>/dev/null || true)"
   [ -n "${_path}" ] || continue
@@ -66,6 +66,27 @@ for _spec in rapidjson numactl boost boost.dev; do
   fi
 done
 unset _pkg _spec _path
+
+# 3. The core builds protobuf, Abseil and re2 itself, but configures those projects without
+#    CMAKE_INSTALL_LIBDIR, so GNUInstallDirs puts them under lib64 while the core looks under
+#    lib (it hardcodes LIB_DIR to "lib" except on CentOS). The inner configuration reads
+#    <Package>_DIR from the environment, so publish whichever directory exists; on a
+#    from-scratch build neither does yet and build_triton_core.sh retries once afterwards.
+_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for _pair in Protobuf:protobuf absl:absl re2:re2; do
+  for _libdir in lib lib64; do
+    _c="${_root}/build/triton-core/third-party/${_pair##*:}/${_libdir}/cmake/${_pair##*:}"
+    if [ -d "${_c}" ]; then export "${_pair%%:*}_DIR=${_c}"; echo "triton build env: ${_pair%%:*}_DIR=${_c}"; break; fi
+  done
+done
+unset _pair _libdir _c _root
+
+# 4. The core links its own re2 but the include directory does not reach triton-core's own
+#    compilation (the target is only linked, and the flag list ends up without it), so add the
+#    directory directly. It is the core's own copy, built from the pinned third-party source.
+_re2_inc="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build/triton-core/third-party/re2/include"
+[ -d "${_re2_inc}" ] && _extra_cxx="${_extra_cxx} -I${_re2_inc}"
+unset _re2_inc
 
 export CMAKE_CXX_FLAGS_EXTRA="${CMAKE_CXX_FLAGS_EXTRA:--include cstdint}${_extra_cxx}${_extra_ld}"
 export CXXFLAGS="${CXXFLAGS:-} -include cstdint${_extra_cxx}${_extra_ld}"

@@ -38,17 +38,37 @@ cmake -S "${core}" -B "${build}" \
   "${policy_flag}" \
   -DTRITON_CORE_HEADERS_ONLY=OFF \
   -DTRITON_ENABLE_GPU=OFF -DTRITON_ENABLE_MALI_GPU=OFF \
+  -DBUILD_TESTING=OFF \
   -DTRITON_ENABLE_METRICS=OFF -DTRITON_ENABLE_METRICS_GPU=OFF -DTRITON_ENABLE_METRICS_CPU=OFF \
   -DTRITON_ENABLE_STATS=OFF -DTRITON_ENABLE_TRACING=OFF -DTRITON_ENABLE_NVTX=OFF \
   -DTRITON_ENABLE_ENSEMBLE=OFF -DTRITON_ENABLE_GCS=OFF -DTRITON_ENABLE_S3=OFF \
   -DTRITON_ENABLE_AZURE_STORAGE=OFF \
   -DTRITON_COMMON_REPO_TAG="${triton_tag}" -DTRITON_THIRD_PARTY_REPO_TAG="${triton_tag}"
 echo "==> building (long)"
-cmake --build "${build}" --parallel "$(nproc)"
+# The first pass can stop in the inner configuration, which needs the protobuf, Abseil and re2
+# the outer projects have just built; their location is only discoverable once they are on disk
+# (tools/triton_build_env.sh). Re-read the environment and retry once.
+if ! cmake --build "${build}" --parallel "$(nproc)"; then
+  echo "==> first pass failed; re-reading the environment and retrying" >&2
+  . "$(dirname "${BASH_SOURCE[0]}")/triton_build_env.sh"
+  cmake --build "${build}" --parallel "$(nproc)"
+fi
 echo "==> installing into ${prefix}"
 cmake --install "${build}"
-[ -f "${prefix}/lib/libtritonserver.so" ] || {
-  echo "error: ${prefix}/lib/libtritonserver.so not produced" >&2
+# The inner project installs the shared library through GNUInstallDirs, which picks lib64 on
+# this platform, while the outer half of the same build looks under lib. Accept either and make
+# the library reachable under both names.
+lib=""
+for candidate in "${prefix}/lib64/libtritonserver.so" "${prefix}/lib/libtritonserver.so"; do
+  [ -f "${candidate}" ] && lib="${candidate}" && break
+done
+if [ -z "${lib}" ]; then
+  echo "error: libtritonserver.so not produced under ${prefix}/lib{,64}" >&2
   echo "hint: TRITON_CORE_HEADERS_ONLY=OFF must be honoured (headers-only is the default)" >&2
-  exit 1; }
-echo "==> done: ${prefix}/lib/libtritonserver.so"
+  exit 1
+fi
+case "${lib}" in
+  "${prefix}/lib64/"*) mkdir -p "${prefix}/lib"
+    ln -sfn ../lib64/libtritonserver.so "${prefix}/lib/libtritonserver.so" ;;
+esac
+echo "==> done: ${lib}"
